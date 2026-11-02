@@ -1,0 +1,14 @@
+venv/
+venv.broken/
+.streamlit/secrets.toml
+records/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 别人的真实简历，绝不进仓库（更不能进公开仓库）
+测评集/
+
+# 本地备份、打包产物，部署用不到
+_backup/
+releases/
