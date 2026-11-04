@@ -8,6 +8,7 @@ __pycache__/
 
 # 秘密与用户数据绝不进镜像
 .streamlit/secrets.toml
+.env
 records/
 测评集/
 简历/
