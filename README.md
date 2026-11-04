@@ -34,3 +34,18 @@ DAILY_CAP_CNY = 10
 ## 许可
 
 - 题库内容来自 [archlizheng/AIPM-Wiki](https://github.com/archlizheng/AIPM-Wiki)，CC BY-NC-SA 4.0，仅用于非商业学习。
+
+
+## 常驻部署（Render / Railway）
+
+仓库已带 `Dockerfile`、`render.yaml`、`railway.json`，迁移不需要改业务代码。
+
+Render：
+
+1. 注册/登录 https://render.com
+2. New → Blueprint → 选择本仓库
+3. 填写 `DEEPSEEK_API_KEY`
+4. Apply，等待 2–3 分钟
+
+`render.yaml` 默认用 `plan: starter`（常驻、不休眠，约 $7/月）。
+想先用免费档可把 `plan` 改成 `free`（15 分钟无访问会休眠）。

@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: ai-interview-mock
+    runtime: docker
+    plan: starter          # 常驻，不休眠；想先白嫖可改成 free（会休眠）
+    region: singapore      # 离国内更近；也可改 oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /_stcore/health
+    autoDeploy: true
+    envVars:
+      - key: DEEPSEEK_API_KEY
+        sync: false        # 部署时在 Render 后台填，不写进仓库
+      - key: PUBLIC_DEMO
+        value: "1"
+      - key: DAILY_CAP_CNY
+        value: "10"

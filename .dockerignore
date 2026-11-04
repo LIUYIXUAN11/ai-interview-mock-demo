@@ -1,0 +1,25 @@
+.git/
+.github/
+venv/
+venv.broken/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 秘密与用户数据绝不进镜像
+.streamlit/secrets.toml
+records/
+测评集/
+简历/
+_backup/
+releases/
+eval/
+refs/
+参考截图/
+.deploy/
+
+# 文档和截图不是运行时依赖，减小镜像
+.review/
+docs/
+*.md
+!README.md
