@@ -14,12 +14,19 @@ import uuid
 import streamlit as st
 
 import practice_ui
+from core import analytics
+from core import demo_resume
 from core import bank, ocr, profile, scope, store
 from core.engine import InterviewEngine
 from core.llm import PRICING_CNY_PER_1M, cost_cny
 from core.report import generate_report
 
 st.set_page_config(page_title="AI 面试官 · 可溯源面试练习", page_icon="🎤", layout="wide")
+
+try:
+    analytics.track("app_open")
+except Exception:
+    pass
 
 
 # ---------------------------------------------------------------- 公开部署护栏
@@ -79,6 +86,8 @@ if _password and not st.session_state.get("_authed"):
 def parse_upload(file) -> tuple[str, str]:
     """把上传的简历转成纯文本，返回 (文本, 错误提示)。失败时告诉用户缺什么、怎么修。"""
     name = (file.name or "").lower()
+    analytics.track("resume_upload", kind=(name.rsplit(".", 1)[-1] or "?"),
+                    size_kb=int((getattr(file, "size", 0) or 0) / 1024))
     try:
         if name.endswith(".pdf"):
             try:
@@ -160,6 +169,7 @@ if mode == "练习":
                 text, err = parse_upload(up)
                 st.session_state["p_sig"] = sig
                 if text:
+                    analytics.track("resume_parse", ok=True, chars=len(text))
                     st.session_state["resume_text"] = text
                     st.session_state["resume_uid"] = profile.add_resume(text, up.name)
                     st.session_state.pop("practice", None)
@@ -169,6 +179,19 @@ if mode == "练习":
                     st.warning(err)
 
         resume = st.session_state.get("resume_text", "")
+
+        # 示例简历（虚构）：没有简历的人也要能一键体验，所以放在 if resume 外面。
+        if st.button("▶ 示例简历（虚构）· 一键体验", use_container_width=True,
+                     help="用一份虚构的 AI 产品经理简历，直接开始练习"):
+            profile.set_active("")          # 别让上一份真实简历在下一页把示例覆盖掉
+            st.session_state["resume_text"] = demo_resume.DEMO_TEXT
+            st.session_state["resume_uid"] = demo_resume.DEMO_ID
+            st.session_state["from_demo"] = True
+            for k in ("projects_cache", "mini", "practice", "p_sig", "upload_sig"):
+                st.session_state.pop(k, None)
+            st.session_state["force_parse"] = True
+            st.rerun()
+
         if resume:
             meta = profile.load()
             fname = _pretty_name(meta.get("resume_from") or "简历")
@@ -182,7 +205,8 @@ if mode == "练习":
                 st.session_state["force_parse"] = True
                 st.rerun()
 
-            history = [h for h in profile.list_resumes() if h["id"] != profile.active_id()]
+            history = [h for h in profile.list_resumes()
+                       if h["id"] not in (profile.active_id(), demo_resume.DEMO_ID)]
             if history:
                 with st.expander(f"历史简历（{len(history)}）"):
                     for h in history:
@@ -247,6 +271,7 @@ with st.sidebar:
             text, err = parse_upload(uploaded)
             st.session_state["upload_sig"] = sig
             if text:
+                analytics.track("resume_parse", ok=True, chars=len(text))
                 st.session_state["resume_text"] = text
                 st.session_state["parse_error"] = ""
             else:

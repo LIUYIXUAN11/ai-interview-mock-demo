@@ -31,7 +31,15 @@ PROMPT = """你是面试教练，正在给候选人的**一句话回答**做体�
 {elements}
 
 【任务】
-0. **先抽事实**：把回答里所有**具体事实**列出来（数字、约束、做法、结果、角色、时间），
+0-A. **先判断这句话有没有在回答这道题**（这一步决定后面要不要打分）：
+   - relevant：答了，要素基本覆盖
+   - partial：答了，但要素覆盖不全
+   - off_topic：**根本没答这道题**（答的是别的事、别的话题）
+   - contradictory：和前面说过的事实冲突
+   判定必须给 quote（逐字，off_topic 时可留空）。
+   **注意**：先讲背景、表达啰嗦、暂时还没讲到行动和结果，都算 partial，**不算 off_topic**。
+
+0-B. **抽事实**：把回答里所有**具体事实**列出来（数字、约束、做法、结果、角色、时间），
    写进 facts 数组。这一步只摘取，不评价。
 1. 然后**对照 facts** 逐个要素判定，三档：
    - hit：说清了
@@ -49,7 +57,27 @@ PROMPT = """你是面试教练，正在给候选人的**一句话回答**做体�
 3. 从回答里挑出**最该改的一小段原文**（8–40 字，逐字），并给两件事：
    - problem：这句话**具体错在哪**（20 字内）
    - fix：**怎么改**（30 字内，可执行，不要"加强逻辑"这种空话）
-4. 从固定根因库里选**一个**：{causes}；
+4. **给三个指标打分（1–5）**，每项一句话理由：
+   - 结构：先结论后展开、有条理
+   - 证据：有数字/事实支撑
+   - 表达：清楚、不绕、不堆术语
+5. **给 1–3 条「问题 → 建议这样说」**（这是核心，必须专业、可直接念）：
+   {{"problem": "这题哪里没答到 / 哪里站不住（一句话）",
+     "say": "建议他直接说出口的一句话"}}
+   - problem 要点到具体的那句话，不写"缺乏数据支撑"这种空话；
+   - say 必须是**能直接念出来的句子**，不是提示；
+   - 按严重程度排序，最要命的放第一条；
+6. **给一段「完整参考答法」**（model_answer）：一段可以直接背的答法，
+   - 用他的真实经历和数字，**不许编造数字或指标**；缺的地方写「（补你的数据）」；
+7. **给 1–3 条逐句替换**（像语法纠错那样可直接抄）：
+   {{"from": "回答里的原句（逐字，必须能在回答里找到）", "to": "建议的说法"}}
+   - **to 只能改表达**：换更准确的说法、补主语、去口语赘余；
+   - **绝对不许新增回答里没有的事实、动作、数字**（比如他没说"我亲手做了拆解"，就不许写成这样）；
+   - 如果他根本没回答这个问题，`to` 就写「（这题他没答，先补：你的具体动作）」这类提示，不要替他编。
+8. **给一段整段润色版**（rewrite）：**只改表达，不许新增任何数字、指标或事实**。
+   - 他原来没说的指标，绝不能出现；缺数据的地方写「（补你的数据）」，**不许编 X/Y/XX**；
+   - 他说的数字必须原样保留，不许改成别的数；
+9. 从固定根因库里选**一个**：{causes}；
 5. 给一版骨架（3–5 步的说话顺序）和一句示范开头。
 
 【硬规则】
@@ -60,12 +88,21 @@ PROMPT = """你是面试教练，正在给候选人的**一句话回答**做体�
 只输出 JSON：
 {{
   "one_line": "一句话点评，20 字内",
+  "status": {{"code": "relevant|partial|off_topic|contradictory", "quote": "支撑判定的逐字片段", "why": "20 字内"}},
   "facts": ["回答里的具体事实，逐条摘，不评价"],
   "elements": [
     {{"name": "情境与影响谁", "verdict": "hit", "why": "说清了谁受影响", "quote": "客服一天要改两百份", "fix": ""}},
     {{"name": "目标与优先级", "verdict": "miss", "why": "没讲为什么先做这个", "quote": "", "fix": "补一句：这块卡点占了售后的 33%"}}
   ],
   "highlight": {{"text": "回答里的逐字片段", "problem": "只说了结果，没给基线", "fix": "先报基線 12.3%，再说现在的 15.1%"}},
+  "metrics": {{"结构": 4, "证据": 2, "表达": 4}},
+  "metric_why": {{"结构": "先给结论", "证据": "没数字", "表达": "不绕"}},
+  "issues": [
+    {{"problem": "只说了怎么算，没说为什么用这个口径", "say": "不用绝对成本，是因为业务方拿它做选型，两个方案参数量差 10 倍，只看成本没法比。"}}
+  ],
+  "model_answer": "我用的口径是每 1 元成本换回的效果百分点……（补你的数据）",
+  "replacements": [{{"from": "所以做了优化", "to": "所以把注册入口从二级页提到首屏"}}],
+  "rewrite": "这次改版是同期唯一的变量……",
   "root_cause": "数据缺失",
   "skeleton": ["先给结论", "再给基线", "然后给变化", "最后给归因"],
   "demo_opening": "上线前是 12.3%，上线后 15.1%——"
@@ -201,6 +238,18 @@ def check(question: str, answer: str, stage: str = "project", intent: str = "",
             "verified": span is not None,
         })
 
+    st_raw = data.get("status") or {}
+    code = str(st_raw.get("code", "")).strip().lower()
+    if code not in ("relevant", "partial", "off_topic", "contradictory"):
+        code = "partial"
+    st_quote = str(st_raw.get("quote", "")).strip()
+    st_span = locate(answer, st_quote) if st_quote else None
+    status = {
+        "code": code,
+        "why": str(st_raw.get("why", ""))[:40],
+        "quote": answer[st_span[0]:st_span[1]] if st_span else (st_quote if code == "off_topic" else ""),
+    }
+
     elements, leak_notes = guards.apply_leakage(question, elements)
     elements, guard_notes = guards.apply_guards(answer, elements)
     guard_notes = leak_notes + guard_notes
@@ -225,11 +274,49 @@ def check(question: str, answer: str, stage: str = "project", intent: str = "",
     if not missed and not any(e["verdict"] == "partial" for e in elements):
         tag = ""
 
+    unscored = status["code"] == "off_topic"
+    # 三指标（1–5，缺省 3）、逐句替换、整段润色
+    met = data.get("metrics") or {}
+    why = data.get("metric_why") or {}
+    metrics = []
+    for k in ("结构", "证据", "表达"):
+        try:
+            v = int(met.get(k, 3))
+        except (TypeError, ValueError):
+            v = 3
+        metrics.append({"name": k, "score": max(1, min(5, v)), "why": str(why.get(k, ""))[:20]})
+
+    repl = []
+    for r in (data.get("replacements") or [])[:3]:
+        if not isinstance(r, dict):
+            continue
+        frm = str(r.get("from", "")).strip()
+        to = str(r.get("to", "")).strip()
+        if frm and to:
+            repl.append({"from": frm[:60], "to": to[:80],
+                         "verified": locate(answer, frm) is not None})
+
+    issues = []
+    for it in (data.get("issues") or [])[:3]:
+        if not isinstance(it, dict):
+            continue
+        prob = str(it.get("problem", "")).strip()
+        say = str(it.get("say", "")).strip()
+        if prob and say:
+            issues.append({"problem": prob[:80], "say": say[:160]})
+
     return {
         "one_line": str(data.get("one_line", ""))[:40],
+        "issues": issues,
+        "model_answer": str(data.get("model_answer", ""))[:400],
+        "metrics": metrics,
+        "replacements": repl,
+        "rewrite": str(data.get("rewrite", ""))[:200],
+        "status": status,
+        "unscored": unscored,
         "facts": [str(f)[:60] for f in (data.get("facts") or [])][:8],
         "elements": elements,
-        "score": score,
+        "score": None if unscored else score,
         "total": len(elements),
         "detail": detail,                        # 可判：细致（0–1）
         "coverage": round(score / len(elements), 2) if elements else 0.0,   # 可判：全面（命中率）

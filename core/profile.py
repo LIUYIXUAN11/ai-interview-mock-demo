@@ -63,9 +63,17 @@ def add_resume(text: str, filename: str = "") -> str:
     return rid
 
 
+def _demo_entry() -> dict:
+    from . import demo_resume
+    return {"id": demo_resume.DEMO_ID, "filename": demo_resume.DEMO_FILE,
+            "chars": len(demo_resume.DEMO_TEXT), "created_at": "", "used_at": "",
+            "demo": True}
+
+
 def list_resumes() -> list[dict]:
+    """历史简历；示例简历（虚构）永远排第一。"""
     if not os.path.isdir(_resume_dir()):
-        return []
+        return [_demo_entry()]
     out = []
     for name in os.listdir(_resume_dir()):
         if not name.endswith(".json"):
@@ -75,10 +83,14 @@ def list_resumes() -> list[dict]:
             out.append({"id": d.get("id", name[:-5]), "filename": d.get("filename", "简历"),
                         "chars": len(d["text"]), "created_at": d.get("created_at", ""),
                         "used_at": d.get("used_at", "")})
-    return sorted(out, key=lambda x: x.get("used_at") or "", reverse=True)
+    out = sorted(out, key=lambda x: x.get("used_at") or "", reverse=True)
+    return [_demo_entry()] + out
 
 
 def load_resume(rid: str = "") -> str:
+    from . import demo_resume
+    if rid == demo_resume.DEMO_ID:
+        return demo_resume.DEMO_TEXT
     rid = rid or active_id()
     if not rid:
         return ""
@@ -102,7 +114,8 @@ def delete_resume(rid: str) -> None:
     if os.path.exists(path):
         os.remove(path)
     if active_id() == rid:
-        remaining = list_resumes()
+        # 示例简历不是真实文件，不能拿来当"下一份"；删完就回到空状态
+        remaining = [r for r in list_resumes() if not r.get("demo")]
         set_active(remaining[0]["id"] if remaining else "")
 
 

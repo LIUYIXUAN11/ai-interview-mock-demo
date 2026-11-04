@@ -13,6 +13,8 @@ import html
 import streamlit as st
 
 from core import mini as mini_mod
+import talk_ui
+from core import analytics
 from core import practice as practice_mod
 from core.mini import INTENTS, MiniInterview
 from core.practice import PracticeSession
@@ -107,6 +109,9 @@ def render_metrics(coach: dict) -> None:
 </style>
 """, unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
+    if score is None:
+        st.warning("这题没答到，暂不评分。")
+        return
     c1.metric("要素命中", f"{score} / {total}")
     c2.metric("全面", f"{int(round(cov * 100))}%" if cov is not None else "—")
     c3.metric("细致", f"{det:.1f}" if det is not None else "—")
@@ -132,6 +137,34 @@ def render_elements(coach: dict) -> None:
                 f"↳ 怎么补：{_esc(e['fix'])}</div>",
                 unsafe_allow_html=True,
             )
+
+
+def render_offtopic(s, latest: dict) -> None:
+    """没答到这道题：第一次给提示重答；第二次记"证据不足"，不评 0 分。"""
+    coach = latest.get("coach") or {}
+    st_ = coach.get("status") or {}
+    n = s.offtopic_count()
+    st.warning(f"这题没答到——{st_.get('why', '答的不是这个问题')}")
+    if st_.get("quote"):
+        st.caption(f"「{st_['quote']}」")
+
+    if n <= 1:
+        st.info("再答一次就好：回到题目问的那件事，先给结论再补细节。")
+        ans = st.text_area("重新回答", height=120, key=f"retry_{s.idx}_{n}",
+                           placeholder="这次直接回答题目问的那件事……")
+        if st.button("提交重答", type="primary", disabled=not (ans or "").strip()):
+            with st.spinner("正在比对……"):
+                s.submit(ans, revise=True)
+                practice_mod.save(s)
+            st.rerun()
+        return
+
+    st.error("两次都没答到，这题记为「证据不足」，不评分。")
+    if st.button("下一题 →", use_container_width=True):
+        if not s.next_unanswered():
+            st.info("这题先跳过，去下一题。")
+        practice_mod.save(s)
+        st.rerun()
 
 
 CIRCLED = "①②③④⑤⑥⑦⑧⑨"
@@ -213,7 +246,7 @@ def render_home(resume: str, jd: str) -> None:
 </style>
 """, unsafe_allow_html=True)
     st.markdown("## 练习 · 选一段经历")
-    st.caption("每段经历：先面一次（3 轮追问）→ 逐轮打分 → 把这 3 题练透 → 复测整链。")
+    st.caption("每段经历点「开始练习」直接进对话：边答边评，追问按你缺的地方走。")
 
     if not (resume or "").strip():
         st.info("先在左侧上传简历——题目会按你简历里的经历出。")
@@ -253,22 +286,21 @@ def render_home(resume: str, jd: str) -> None:
                     st.markdown(f"**{it['name']}**")
                     st.caption(f"依据：{it['evidence']}")
                     prev = mini_mod.find_for(it["name"])
-                    if prev is not None and not prev.finished:
-                        label, hint = "接着面", f"上次停在第 {len(prev.answers) + 1}/3 轮"
+                    unfinished = prev is not None and not prev.finished
+                    if unfinished:
+                        st.caption(f"上次停在第 {len(prev.answers) + 1} 轮，点「开始练习」接着练")
                     elif prev is not None:
-                        label = "重新面"
-                        sc = (prev.report or {}).get("score")
-                        hint = f"上次 {sc}/{len((prev.report or {}).get('rounds', [])) * 5}" if sc is not None else "上次已面完"
-                    else:
-                        label, hint = "先面一次", ""
-                    if hint:
-                        st.caption(hint)
+                        st.caption(f"上次练了 {len(prev.answers)} 轮，点「开始练习」重新开始")
 
                     def start_fresh():
+                        analytics.track("experience_select", kind=cat)
                         m2 = MiniInterview(it, resume, jd)
                         with st.spinner("准备面试官……"):
                             if m2.start():
                                 mini_mod.save(m2)
+                                import time as _t
+                                st.session_state["tk_enter_ts"] = _t.time()
+                                analytics.track("session_start", resumed=False)
                                 st.session_state["mini"] = m2
                                 st.session_state["practice_home"] = False
                                 st.session_state.pop("mini_before", None)
@@ -276,35 +308,25 @@ def render_home(resume: str, jd: str) -> None:
                             else:
                                 st.error(m2.error or "出题失败")
 
-                    if prev is not None and not prev.finished:
-                        c1, c2 = st.columns(2)
-                        if c1.button("接着面", key=f"mini_cont_{cat}_{i}", use_container_width=True):
-                            st.session_state["mini"] = prev           # 接着面：直接续上
-                            st.session_state["practice_home"] = False
-                            st.rerun()
-                        if c2.button("重新面", key=f"mini_redo_{cat}_{i}", use_container_width=True):
-                            start_fresh()
-                    elif prev is not None and prev.finished:
-                        def practice_this():
-                            sess = PracticeSession(entry=prev.entry, resume=prev.resume, jd=prev.jd,
-                                                   items=prev.practice_items())
-                            if sess.start():
-                                practice_mod.save(sess)
-                                st.session_state["practice"] = sess
-                                st.session_state["mini_before"] = prev.report
-                                st.session_state["practice_home"] = False
-                                st.rerun()
-                            else:
-                                st.error(sess.error or "题目准备失败")
+                    def enter(m):
+                        import time as _t
+                        st.session_state["tk_enter_ts"] = _t.time()
+                        analytics.track("session_start", resumed=True)
+                        st.session_state["mini"] = m
+                        st.session_state["practice_home"] = False
+                        st.rerun()
 
-                        c1, c2 = st.columns(2)
-                        if c1.button("重新面", key=f"mini_redo_{cat}_{i}", use_container_width=True):
-                            start_fresh()
-                        if c2.button("开始练习", key=f"mini_practice_{cat}_{i}", type="primary",
+                    # 每张卡都是同一套按钮：主按钮「开始练习」（未完成就续上）
+                    if unfinished:
+                        c1, c2 = st.columns([2, 1])
+                        if c1.button("开始练习", key=f"mini_go_{cat}_{i}", type="primary",
                                      use_container_width=True):
-                            practice_this()
+                            enter(prev)
+                        if c2.button("重新开始", key=f"mini_redo_{cat}_{i}", use_container_width=True):
+                            start_fresh()
                     else:
-                        if st.button(label, key=f"mini_{cat}_{i}", use_container_width=True):
+                        if st.button("开始练习", key=f"mini_go_{cat}_{i}", type="primary",
+                                     use_container_width=True):
                             start_fresh()
 
 
@@ -450,6 +472,11 @@ def render_practice(s) -> None:
         return
 
     coach = latest.get("coach")
+    status = (coach or {}).get("status") or {}
+    if coach and status.get("code") == "off_topic":
+        render_offtopic(s, latest)
+        return
+
     if not coach:
         st.warning("这次体检没成功。")
         if st.button("重新体检"):
@@ -498,20 +525,15 @@ def render_practice(s) -> None:
 # ---------------------------------------------------------------- 入口
 
 def restore() -> None:
-    """刷新后接着来：优先恢复没面完的那场，其次恢复没练完的，最后恢复刚出成绩的那场。"""
-    if st.session_state.get("mini") or st.session_state.get("practice"):
+    """刷新后接着来：只恢复对话（旧的逐题练不再恢复）。"""
+    if st.session_state.get("mini"):
         return
     if st.session_state.get("practice_home"):
         return
     m = mini_mod.latest()
     if m is not None and not m.finished:
         st.session_state["mini"] = m
-        st.info(f"已恢复上次没面完的面试：第 {len(m.answers) + 1}/3 轮。")
-        return
-    s = practice_mod.load_latest_unfinished()
-    if s is not None:
-        st.session_state["practice"] = s
-        st.info(f"已恢复上次没练完的练习：第 {s.idx + 1}/{len(s.questions)} 题。")
+        st.info(f"已恢复上次没练完的对话：第 {len(m.answers) + 1} 轮。")
         return
     if m is not None and m.finished and m.report:
         st.session_state["mini"] = m
@@ -521,12 +543,7 @@ def restore() -> None:
 def render(resume: str, jd: str) -> None:
     restore()
     m = st.session_state.get("mini")
-    s = st.session_state.get("practice")
-
     if m is not None:
-        render_mini(m)
-        return
-    if s is not None:
-        render_practice(s)
+        talk_ui.render(m, on_exit=back_home)
         return
     render_home(resume, jd)

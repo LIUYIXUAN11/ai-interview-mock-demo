@@ -16,10 +16,14 @@ import os
 import re
 import time
 
+from . import claims as claims_mod
+from . import coach as coach_mod
+from . import review as review_mod
+from . import probe as probe_mod
 from . import rubric
 from .llm import LLMError, chat
 
-ROUNDS = 3
+ROUNDS = 0          # 0 = 不限轮次（无限练习）；用户随时可以结束
 
 ANGLE_MAP = {
     "info": "why_do",
@@ -232,6 +236,115 @@ _FALLBACK_TPL = {
 }
 
 
+_TYPE_QUESTION = {
+    "result": "你提到「{p}」，这个数字的口径和基线是什么？",
+    "design": "你提到「{p}」，这个设计当时的依据和约束是什么？",
+    "judgment": "你说「{p}」，当时凭什么这么判断？排除了什么？",
+    "action": "你提到「{p}」，具体你亲手做了哪几件事？",
+    "tradeoff": "你说「{p}」，当时还有别的选择吗？为什么选它？",
+}
+
+_LIMIT_WORDS = ("没有灰度", "没做灰度", "没有对照组", "没做对照", "无法排除", "不能排除",
+                "没法排除", "排除不了", "记不清", "不确定", "没有实验", "做不到严格",
+                "霍桑", "存在混杂", "归因打折扣", "相关性证据", "不排除")
+
+_GAP_TPL_BY_ANGLE = {
+    "口径": "这个数具体怎么算的？分母和时间窗是什么？",
+    "归因": "结果变好，你怎么确定是你这几个动作带来的？",
+    "角色": "这部分里哪些是你亲手做的？",
+    "取舍": "当时还有别的做法吗？为什么最后选这个？",
+    "边界": "这套做法在什么情况下会失效？",
+    "机制": "这套方案具体是怎么跑起来的？",
+    "验证": "你当时怎么验证它确实有效？",
+    "贡献": "几个动作各自的贡献怎么区分？",
+}
+
+_GENERIC = ("详细讲讲", "展开说说", "再具体一点", "具体一点", "能说说吗")
+
+
+def _acknowledges_limit(text: str) -> bool:
+    """候选人有没有明确承认"这块做不到严格验证"。"""
+    return any(w in (text or "") for w in _LIMIT_WORDS)
+
+
+_ANGLE_WORDS = {
+    "口径": ("口径", "怎么算", "分母", "定义", "怎么统计"),
+    "归因": ("归因", "确认是你", "排除", "对照", "对照组"),
+    "角色": ("亲手", "哪部分是你", "独立", "团队做的"),
+    "取舍": ("砍掉", "备选", "别的做法", "为什么选"),
+    "边界": ("失效", "什么情况下", "约束", "风险"),
+    "机制": ("怎么实现", "原理", "链路", "具体怎么设计"),
+    "验证": ("验证", "怎么判断有效", "指标"),
+    "贡献": ("贡献", "各自", "拆", "增量"),
+}
+
+
+def _angle_of(q: str) -> str:
+    """粗分问题角度，用来避免反复问同一类。"""
+    for name, words in _ANGLE_WORDS.items():
+        if any(w in (q or "") for w in words):
+            return name
+    return ""
+
+
+def _status_of(st: dict, i: int) -> str:
+    """兼容 int / str 键。"""
+    v = (st or {}).get(i) or (st or {}).get(str(i)) or {}
+    return v.get("status", "")
+
+
+def _same_numbers(q: str, history: list[str]) -> bool:
+    """新问题如果和之前某个问题用的是同一组数字，就是在问同一件事。"""
+    def nums(t):
+        return {x for x in re.findall(r"\d+(?:\.\d+)?%?", t or "") if len(x) >= 2}
+    qn = nums(q)
+    if not qn:
+        return False
+    return any(qn & nums(h) for h in history)
+
+
+def _too_similar(q: str, history: list[str], n: int = 10) -> bool:
+    """新问题与之前某个问题共享 10 字以上片段，就当成重复。"""
+    q = re.sub(r"\s+", "", q or "")
+    if len(q) < n:
+        return False
+    grams = {q[i:i + n] for i in range(len(q) - n + 1)}
+    for h in history:
+        h = re.sub(r"\s+", "", h or "")
+        for i in range(max(0, len(h) - n + 1)):
+            if h[i:i + n] in grams:
+                return True
+    return False
+
+
+def _is_generic(q: str) -> bool:
+    """是不是不接内容的套话。"""
+    return any(g in (q or "") for g in _GENERIC)
+
+
+_GAP_TPL = [
+    ("口径", "这个数具体怎么算的？分母、时间窗分别是什么？"),
+    ("数据", "这个结论背后的数据是怎么得来的？样本和时间范围是什么？"),
+    ("归因", "结果变好，你怎么确定是你这几个动作带来的？"),
+    ("动作", "你具体做了哪几件事？各自起了什么作用？"),
+    ("角色", "这部分里哪些是你亲手做的，哪些是团队做的？"),
+    ("取舍", "当时还有别的做法吗？为什么最后选这个？"),
+    ("边界", "这套做法在什么情况下会失效？"),
+]
+
+
+def _gap_question(gap: dict, answer: str) -> str:
+    """按缺口造句：缺口是什么，就问什么，避免每轮同一句。"""
+    missing = (gap or {}).get("missing", "")
+    for key, tpl in _GAP_TPL:
+        if key in missing:
+            return tpl
+    phrases = salient(answer)
+    if phrases:
+        return f"你刚才说「{phrases[0]}」，这块能再往下说一层吗？具体是怎么做的？"
+    return "这块能再说细一点吗？比如你当时具体做了什么。"
+
+
 def _fallback_followup(answer: str, intent: str = "") -> str:
     """模型没接上原话时的兜底：用候选人自己的片段造句，且贴合本轮考察意图。"""
     phrases = salient(answer)
@@ -284,8 +397,14 @@ class MiniInterview:
         self.resume = resume or ""
         self.jd = jd or ""
         self.questions: list[str] = []
+        self.claims: list[dict] = []              # 这段经历的待验证主张
+        self.claim_status: list[dict] = []        # 每轮回答后，各主张的证明状态
+        self.gaps: list[dict] = []                # 每轮指出的缺口
+        self.probed: dict[str, int] = {}          # 每条主张追问过几次（同一主张最多 2 刀）
+        self.limited: dict[str, bool] = {}        # 哪些主张候选人已承认"做不到严格验证"
         self.intents: list[str] = []               # 每题的问题类型（决定用哪套固定清单）
         self.answers: list[str] = []
+        self.evals: list[dict] = []               # 每轮回答的即时评价（三指标/纠错/润色）
         self.idx = 0                 # 当前第几轮（0 起）
         self.finished = False
         self.report = None
@@ -304,30 +423,112 @@ class MiniInterview:
         if not name:
             self.error = "没有选中要面的经历"
             return False
-        data, _ = _ask(MAIN_PROMPT.format(name=name, context=self.entry.get("context") or self.entry.get("evidence", "")), 0.6)
-        q = (data or {}).get("question", "").strip()
+        context = self.entry.get("context") or self.entry.get("evidence", "")
+        got = claims_mod.extract(name, context)
+        if got and got.get("claims"):
+            self.claims = got["claims"]
+            q = (got.get("question") or "").strip()
+            angle = "judgment"
+        else:                                        # 抽不出主张就退回旧的主问
+            data, _ = _ask(MAIN_PROMPT.format(name=name, context=context), 0.6)
+            q = (data or {}).get("question", "").strip()
+            angle = str((data or {}).get("angle", "")).strip().lower() or "judgment"
         if not q:
             self.error = "题目生成失败，请重试"
             return False
         self.questions = [q]
-        angle = str((data or {}).get("angle", "")).strip().lower()
         self.intents = [ANGLE_MAP.get(angle, INTENTS[0][0])]
         self.answers = []
         self.idx = 0
         return True
 
     def answer(self, text: str) -> bool:
-        """记录一轮回答；未满 3 轮就生成下一刀追问，满 3 轮就整链打分。"""
+        """记录一轮回答；还有主张没被证明就按缺口追问，证明完了或到上限就打分。"""
         text = (text or "").strip()
         if not text or self.finished:
             return False
         self.answers.append(text)
 
-        if len(self.answers) >= ROUNDS:
-            self.finish()
-            return True
+        # 即时评价：这一轮说成什么样（三指标 + 逐句替换 + 润色）
+        try:
+            ev = coach_mod.check(self.questions[len(self.answers) - 1], text,
+                                 intent=self.intents[len(self.answers) - 1]
+                                 if len(self.intents) >= len(self.answers) else "")
+            self.evals.append(ev or {})
+        except Exception as e:
+            self.evals.append({"error": str(e)[:80]})
 
-        key, intent_name, intent_desc = INTENTS[len(self.answers)]
+        # 有主张：走"缺口驱动"；没主张：退回旧的固定追问
+        if self.claims:
+            history = [{"q": self.questions[i], "a": self.answers[i]}
+                       for i in range(min(len(self.questions), len(self.answers)))]
+            used = [a for a in (_angle_of(q) for q in self.questions[:-1]) if a]
+            res = probe_mod.next_probe(self.entry.get("name", ""), self.claims,
+                                       history, text, used_angles=used)
+            if res:
+                self.claim_status.append(res.get("statuses") or {})
+                if res.get("gap"):
+                    self.gaps.append(res["gap"])
+                exhausted = all(self.probed.get(str(i), 0) >= 2 for i in range(len(self.claims)))
+                if res.get("all_proven") or exhausted:
+                    # 对话练习没有终点：这套主张问透了，就换个角度再开一问
+                    nxt = self._new_angle_question()
+                    if nxt:
+                        self.questions.append(nxt)
+                        self.intents.append("why_do")
+                        self.idx = len(self.answers)
+                        self.touch()
+                        return True
+                q = (res.get("question") or "").strip()
+                if q:
+                    if _is_generic(q) or not q:
+                        q = _gap_question(res.get("gap") or {}, text)
+                    else:
+                        q = self._review_and_fix(q, text, res.get("gap") or {})
+
+                gap = res.get("gap") or {}
+                idx = gap.get("index")
+                if isinstance(idx, int) and idx >= 0:
+                    self.probed[str(idx)] = self.probed.get(str(idx), 0) + 1
+
+                # 他已经承认这块做不到严格验证 → 不再追问"怎么排除"，改问"当时实际怎么判断的"
+                locked = False
+                if isinstance(idx, int) and idx >= 0 and _acknowledges_limit(text):
+                    self.limited[str(idx)] = True
+                    q = "你说这块没法严格验证——那当时你实际是怎么判断这个改动有效的？"
+                    locked = True
+
+                # 重复追问同一个点（或同一主张已追两次）→ 换一条主张
+                # 追问一定要先"接住"他说的话；没接住就用他的原话补一个开头
+                if q and not any(k in q for k in ("你说", "你提到", "你刚才", "「")):
+                    ph = salient(text)
+                    if ph:
+                        q = f"你说「{ph[0]}」，" + q
+
+                if q and not locked and _angle_of(q) and used.count(_angle_of(q)) >= 2 + 1:
+                    alt_angle = next((a for a in _ANGLE_WORDS if a not in used), "")
+                    if alt_angle:
+                        q = _GAP_TPL_BY_ANGLE.get(alt_angle, q)
+
+                if q and not locked and (_too_similar(q, self.questions)
+                                         or _same_numbers(q, self.questions)
+                                         or (isinstance(idx, int) and self.probed.get(str(idx), 0) > 2)):
+                    alt = self._switch_claim(gap, text)
+                    if alt:
+                        q = alt
+
+                # 换到另一条主张时，先说一句收束，别像翻简历
+                prev_idx = self.gaps[-2].get("index") if len(self.gaps) >= 2 else None
+                if isinstance(idx, int) and prev_idx is not None and idx != prev_idx:
+                    q = "这块我大概清楚了，换一个问问——" + q
+                    self.questions.append(q)
+                    self.intents.append("why_this")
+                    self.idx = len(self.answers)
+                    self.touch()
+                    return True
+
+        it = min(len(self.answers), len(INTENTS) - 1)      # 轮次上限 4 > 意图数 3，取最后一个兜底
+        key, intent_name, intent_desc = INTENTS[it]
         data, _ = _ask(FOLLOWUP_PROMPT.format(
             round_no=len(self.answers) + 1,
             name=self.entry.get("name", ""),
@@ -343,7 +544,6 @@ class MiniInterview:
             self.answers.pop()
             return False
 
-        # 追问必须接上候选人自己的话；没接上就重写一次，再不行用原话兜底
         if not quotes_answer(q, text):
             retry, _ = _ask(FOLLOWUP_PROMPT.format(
                 round_no=len(self.answers) + 1,
@@ -358,14 +558,109 @@ class MiniInterview:
             q = q2 if q2 and quotes_answer(q2, text) else _fallback_followup(text, key)
 
         self.questions.append(q)
-        self.intents.append(key)                 # 追问用本轮固定意图
+        self.intents.append(key)
         self.idx = len(self.answers)
         self.touch()
         return True
 
+    def _proven_count(self) -> int:
+        if not self.claim_status:
+            return 0
+        st = self.claim_status[-1]
+        return sum(1 for i in range(len(self.claims)) if _status_of(st, i) == "proven")
+
+    def _no_new_info(self) -> bool:
+        """连续两轮，已证明的主张数没变 → 再问也挖不出东西。"""
+        if len(self.claim_status) < 2:
+            return False
+        prev, cur = self.claim_status[-2], self.claim_status[-1]
+        if not prev or not cur:          # 这一轮没拿到有效判定，不做结论
+            return False
+
+        def rank(st, i):
+            v = _status_of(st, i)
+            return 2 if v == "proven" else 1 if v == "partial" else 0
+
+        # 只要有任意一条主张状态变好，就算有新信息
+        improved = any(rank(cur, i) > rank(prev, i) for i in range(len(self.claims)))
+        return not improved
+
+    def _remaining_low_risk(self) -> bool:
+        """剩下没证明的主张都是低风险 → 不值得再追。"""
+        if not self.claim_status:
+            return False
+        st = self.claim_status[-1]
+        if not st:
+            return False
+        for i, c in enumerate(self.claims):
+            v = _status_of(st, i)
+            if v == "proven":
+                continue
+            if v == "partial":                               # 聊到一半的还要追
+                return False
+            if c.get("tags"):                                # 有风险标签 → 高价值
+                return False
+        return True
+
+    def stop_reason(self) -> str:
+        """为什么停：全证明 / 无新信息 / 剩余低风险 / 到上限。"""
+        if not self.claim_status:
+            return ""
+        if all(self.claim_status[-1].get(i, {}).get("status") == "proven" for i in range(len(self.claims))):
+            return "关键主张都已被证明"
+        if self._no_new_info():
+            return "连续两轮没有新的有效信息"
+        if self._remaining_low_risk():
+            return "剩下的主张风险都不高，再问收益不大"
+        if self.claims and all(self.probed.get(str(i), 0) >= 2 for i in range(len(self.claims))):
+            return "每条主张都问过两遍了"
+        return ""
+
+    def _new_angle_question(self) -> str:
+        """主张聊透了之后，换一个新角度继续问（不让对话结束）。"""
+        asked = "；".join(self.questions[-6:])
+        data, _ = _ask(MAIN_PROMPT.format(
+            name=self.entry.get("name", ""),
+            context=(self.entry.get("context") or self.entry.get("evidence", "")),
+        ), 0.7)
+        q = (data or {}).get("question", "").strip()
+        if not q or q in self.questions:
+            q = "这段经历里，如果让你现在重做一遍，你会最先改哪一步？为什么？"
+        return q
+
+    def _switch_claim(self, gap: dict, last_answer: str) -> str:
+        """换一条还没聊过的主张，按它的类型造一句追问。"""
+        cur = gap.get("index")
+        for i, c in enumerate(self.claims):
+            if i == cur:
+                continue
+            if self.probed.get(str(i), 0) >= 2:
+                continue
+            tpl = _TYPE_QUESTION.get(c.get("type", ""), "这条你能具体说说吗？")
+            return tpl.format(p=c.get("text", "")[:24])
+        return ""
+
+    def _review_and_fix(self, q: str, last_answer: str, gap: dict) -> str:
+        """审稿：不合格就带着理由重写一次；还不行就用按缺口造的句子。"""
+        rv = review_mod.check(q, self.entry.get("name", ""), self.questions[-1], last_answer)
+        if rv.get("ok"):
+            return q
+
+        hint = rv.get("fix_hint") or "换个问法：抓住他刚说的一个点，问判断不问事实"
+        hist = [{"q": self.questions[i], "a": self.answers[i]}
+                for i in range(min(len(self.questions), len(self.answers)))]
+        res2 = probe_mod.next_probe(self.entry.get("name", ""), self.claims, hist,
+                                    last_answer + f"\n\n【上一版追问被退回：{hint}，请换个问法】")
+        q2 = (res2.get("question") or "").strip()
+        if not q2 or _is_generic(q2):
+            return _gap_question(gap, last_answer)
+
+        rv2 = review_mod.check(q2, self.entry.get("name", ""), self.questions[-1], last_answer)
+        return q2 if rv2.get("ok") else _gap_question(gap, last_answer)
+
     def finish(self):
         self.finished = True
-        self.idx = ROUNDS - 1
+        self.idx = max(len(self.questions) - 1, 0)
         self.report = self.score()
         self.touch()
 
@@ -433,7 +728,8 @@ class MiniInterview:
 
     # ---------------------------------------------------------------- 序列化
 
-    _FIELDS = ("entry", "resume", "jd", "questions", "intents", "answers", "idx", "finished",
+    _FIELDS = ("entry", "resume", "jd", "questions", "claims", "claim_status", "gaps", "evals",
+               "intents", "answers", "idx", "finished",
                "report", "error", "session_id", "created_at", "updated_at")
 
     def to_dict(self) -> dict:
@@ -445,6 +741,9 @@ class MiniInterview:
         for k in cls._FIELDS:
             if k in d:
                 setattr(m, k, d[k])
+        # JSON 存盘会把 int 键变成字符串，读回来统一转回 int
+        m.claim_status = [{int(k): v for k, v in (st or {}).items()} for st in (m.claim_status or [])]
+        m.probed = {str(k): v for k, v in (m.probed or {}).items()}
         return m
 
 

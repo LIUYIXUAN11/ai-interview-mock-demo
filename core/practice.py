@@ -467,6 +467,7 @@ class PracticeSession:
         self.rewrites = 0
         self.rev_counts: dict[str, int] = {}   # 每题改过几版（改版是覆盖，不能靠 len 推）
         self.baselines: dict[str, dict] = {}   # 原答的体检结果（"优化方向"），每题只算一次
+        self.offtopic: dict[str, int] = {}     # 每题被判"没答到"的次数
         self.finished = False
         self.schema = SCHEMA
         self.source_sig = source_signature(self.resume, self.jd)
@@ -590,6 +591,10 @@ class PracticeSession:
 
     # ---------------------------------------------------------------- 答题
 
+    def offtopic_count(self, idx: int | None = None) -> int:
+        i = self.idx if idx is None else idx
+        return int(self.offtopic.get(str(i), 0))
+
     def baseline_answer(self, idx: int | None = None) -> str:
         """用户在迷你面试里对这道题的原答。"""
         i = self.idx if idx is None else idx
@@ -629,6 +634,9 @@ class PracticeSession:
         else:
             versions.append({"answer": answer, "coach": result,
                              "at": time.strftime("%H:%M:%S"), "rev": False})
+        if result is not None and result.get("unscored"):
+            self.offtopic[str(self.idx)] = self.offtopic.get(str(self.idx), 0) + 1
+
         if self.is_retest:
             self.finished = True
         self.touch()
@@ -684,7 +692,7 @@ class PracticeSession:
     # ---------------------------------------------------------------- 序列化
 
     _FIELDS = ("stage", "resume", "jd", "entry", "schema", "questions", "idx", "versions", "rev_counts",
-               "baselines", "rewrites",
+               "baselines", "offtopic", "rewrites",
                "finished", "session_id", "created_at", "updated_at", "error", "source_sig")
 
     def to_dict(self) -> dict:
