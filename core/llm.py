@@ -22,8 +22,11 @@ PRICING_CNY_PER_1M = {"input": 2.13, "output": 8.52}
 # 一是不需要（面试对话不需要长链推理），二是能把延迟和输出 token 压住。
 MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 
-TIMEOUT_SECONDS = 60
-MAX_RETRIES = 2
+# 一次调用最多 30 秒、最多 2 次尝试。
+# 之前 60 秒 × 3 次，一轮里只要模型抖动，页面就会卡 3 分钟，
+# 用户看到的就是"转圈转到崩"。宁可快速失败给出可读提示，也不要长时间挂住。
+TIMEOUT_SECONDS = 30
+MAX_RETRIES = 1
 
 
 # 匹配 [[END]] / [END] / [[ end ]] 等写法，整段剥掉，不留 "[]" 残渣

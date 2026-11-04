@@ -530,12 +530,18 @@ def restore() -> None:
         return
     if st.session_state.get("practice_home"):
         return
-    m = mini_mod.latest()
-    if m is not None and not m.finished:
+    try:
+        m = mini_mod.latest()
+    except Exception:
+        # 旧版本存档/坏文件不能让每次打开都崩在恢复这一步
+        st.session_state.pop("mini", None)
+        st.warning("上次的练习记录读取失败，已跳过，可以直接开新的一场。")
+        return
+    if m is not None and m.questions and not m.finished:
         st.session_state["mini"] = m
         st.info(f"已恢复上次没练完的对话：第 {len(m.answers) + 1} 轮。")
         return
-    if m is not None and m.finished and m.report:
+    if m is not None and m.questions and m.finished and m.report:
         st.session_state["mini"] = m
         st.info("已打开上一次面试的成绩单。")
 

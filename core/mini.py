@@ -445,7 +445,7 @@ class MiniInterview:
     def answer(self, text: str) -> bool:
         """记录一轮回答；还有主张没被证明就按缺口追问，证明完了或到上限就打分。"""
         text = (text or "").strip()
-        if not text or self.finished:
+        if not text or self.finished or not self.questions:
             return False
         self.answers.append(text)
 
@@ -741,9 +741,19 @@ class MiniInterview:
         for k in cls._FIELDS:
             if k in d:
                 setattr(m, k, d[k])
-        # JSON 存盘会把 int 键变成字符串，读回来统一转回 int
-        m.claim_status = [{int(k): v for k, v in (st or {}).items()} for st in (m.claim_status or [])]
-        m.probed = {str(k): v for k, v in (m.probed or {}).items()}
+        # 旧版本存档可能缺字段/类型不对：这里统一兜底，坏档不能让首页起不来
+        for k in ("questions", "claims", "claim_status", "gaps", "evals", "intents", "answers"):
+            if not isinstance(getattr(m, k, None), list):
+                setattr(m, k, [])
+        try:
+            # JSON 存盘会把 int 键变成字符串，读回来统一转回 int
+            m.claim_status = [{int(k): v for k, v in (st or {}).items()} for st in m.claim_status]
+        except (AttributeError, TypeError, ValueError):
+            m.claim_status = []
+        try:
+            m.probed = {str(k): v for k, v in (m.probed or {}).items()}
+        except (AttributeError, TypeError):
+            m.probed = {}
         return m
 
 
@@ -775,7 +785,8 @@ def load(session_id: str):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return MiniInterview.from_dict(data) if isinstance(data, dict) else None
-    except (json.JSONDecodeError, OSError, TypeError):
+    except Exception:
+        # 坏档/旧 schema 一律当没有，绝不能让恢复流程把整个页面炸掉
         return None
 
 

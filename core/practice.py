@@ -735,7 +735,7 @@ def load(session_id: str):
         if not isinstance(data, dict):      # 目录里混进别的 json 时不要炸
             return None
         return PracticeSession.from_dict(data)
-    except (json.JSONDecodeError, OSError, AttributeError, TypeError):
+    except Exception:
         return None
 
 
