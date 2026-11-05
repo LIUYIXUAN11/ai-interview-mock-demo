@@ -14,6 +14,7 @@ import json
 import re
 
 from . import guards, rubric
+from .settings import temp as _t
 from .llm import LLMError, chat
 
 PROMPT = """你是面试教练，正在给候选人的**一句话回答**做体检。
@@ -38,6 +39,7 @@ PROMPT = """你是面试教练，正在给候选人的**一句话回答**做体�
    - contradictory：和前面说过的事实冲突
    判定必须给 quote（逐字，off_topic 时可留空）。
    **注意**：先讲背景、表达啰嗦、暂时还没讲到行动和结果，都算 partial，**不算 off_topic**。
+   只要回答里提到了题目问的那件事（哪怕只答了一部分），就算 partial，**不要判 off_topic**。
 
 0-B. **抽事实**：把回答里所有**具体事实**列出来（数字、约束、做法、结果、角色、时间），
    写进 facts 数组。这一步只摘取，不评价。
@@ -170,13 +172,30 @@ def check(question: str, answer: str, stage: str = "project", intent: str = "",
     """
     answer = (answer or "").strip()
     if len(answer) < 10:
-        return None
+        # 太短 = 没内容可评：不判"没问题"，也不批评，给几个可以展开的方向
+        return {
+            "status": {"code": "partial", "why": "只答了几个字", "quote": answer},
+            "unscored": True,
+            "one_line": "这轮聊得有点短",
+            "facts": [],
+            "metrics": [],
+            "issues": [],
+            "hints": [
+                "当时看到了什么——数据、反馈、访谈里的一条都行",
+                "你为这件事做了什么动作，哪一步是你自己定的",
+                "结果怎样，你是怎么判断有效的",
+            ],
+            "model_answer": "",
+            "replacements": [],
+            "rewrite": "",
+            "score": None,
+            "total": 0,
+            "elements": [],
+            "leak_notes": [],
+            "root_cause": {},
+        }
 
-    if checkpoints:                    # 题自带考察点：直接用它，不按类型查表（根治"贴错标签"）
-        spec = {"label": "题目自带", "elements": [{"name": str(c)[:20], "star": "", "hint": ""}
-                                                  for c in checkpoints[:6]]}
-    else:
-        spec = rubric.elements_for(intent)
+    spec = rubric.ELEMENT_SETS.get(intent) or rubric.ELEMENT_SETS["default"]
     prompt = PROMPT.format(
         question=question or "（上一轮提问）",
         answer=answer,
@@ -184,7 +203,7 @@ def check(question: str, answer: str, stage: str = "project", intent: str = "",
         causes=" / ".join(rubric.ROOT_CAUSES),
     )
     try:
-        raw, _ = chat([{"role": "user", "content": prompt}], temperature=0.0, json_mode=True)
+        raw, _ = chat([{"role": "user", "content": prompt}], temperature=_t('coach', 0.0), json_mode=True)
     except LLMError:
         return None
 

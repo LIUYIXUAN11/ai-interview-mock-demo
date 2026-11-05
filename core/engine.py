@@ -14,6 +14,7 @@ v2.7 增加「越权拦截」：
 import time
 
 from . import prompts
+from .settings import temp as _t
 from .llm import LLMError, chat, parse_reply
 
 
@@ -100,7 +101,7 @@ class InterviewEngine:
         t0 = time.time()
         text, usage = chat(
             [{"role": "system", "content": self._system_prompt(extra_system)}] + self.messages,
-            temperature=temperature,
+            temperature=_t("interview", temperature),
         )
         self.usage["input"] += usage["input"]
         self.usage["output"] += usage["output"]

@@ -15,6 +15,7 @@ import streamlit as st
 
 import practice_ui
 from core import analytics
+from core import mini as mini_mod
 from core import demo_resume
 from core import bank, ocr, profile, scope, store
 from core.engine import InterviewEngine
@@ -181,12 +182,13 @@ if mode == "练习":
         resume = st.session_state.get("resume_text", "")
 
         # 示例简历（虚构）：没有简历的人也要能一键体验，所以放在 if resume 外面。
-        if st.button("▶ 示例简历（虚构）· 一键体验", use_container_width=True,
+        if st.button("🎬 示例简历（虚构）· 一键体验", use_container_width=True,
                      help="用一份虚构的 AI 产品经理简历，直接开始练习"):
             profile.set_active("")          # 别让上一份真实简历在下一页把示例覆盖掉
             st.session_state["resume_text"] = demo_resume.DEMO_TEXT
             st.session_state["resume_uid"] = demo_resume.DEMO_ID
             st.session_state["from_demo"] = True
+            st.session_state["practice_home"] = True          # 不要恢复任何旧对话
             for k in ("projects_cache", "mini", "practice", "p_sig", "upload_sig"):
                 st.session_state.pop(k, None)
             st.session_state["force_parse"] = True
@@ -194,8 +196,11 @@ if mode == "练习":
 
         if resume:
             meta = profile.load()
-            fname = _pretty_name(meta.get("resume_from") or "简历")
-            when = meta.get("updated_at") or ""
+            if st.session_state.get("from_demo") or st.session_state.get("resume_uid") == demo_resume.DEMO_ID:
+                fname, when = "示例简历（虚构）", ""
+            else:
+                fname = _pretty_name(meta.get("resume_from") or "简历")
+                when = meta.get("updated_at") or ""
             with st.container(border=True):
                 st.caption("当前简历")
                 st.markdown(f"**{fname}**")
@@ -220,14 +225,28 @@ if mode == "练习":
                             st.session_state["force_parse"] = True
                             st.rerun()
 
-            if st.button("换一份简历", use_container_width=True):
-                for k in ("resume_text", "projects_cache", "parse_done", "p_sig"):
-                    st.session_state.pop(k, None)
-                profile.clear_resume()
-                st.rerun()
         else:
             st.caption("先上传简历，才能按经历出题")
         jd = st.text_area("目标岗位 JD（可选）", height=110, key="jd_input")
+
+        if st.session_state.get("confirm_clear"):
+            @st.dialog("清空所有练习记录？")
+            def _clear_dialog():
+                st.caption("会删除所有对话与练习记录，不可恢复。简历不受影响。")
+                c1, c2 = st.columns(2)
+                if c1.button("取消", use_container_width=True):
+                    st.session_state.pop("confirm_clear", None)
+                    st.rerun()
+                if c2.button("确认清空", type="primary", use_container_width=True):
+                    n = mini_mod.clear_history()
+                    st.session_state.pop("confirm_clear", None)
+                    for k in ("mini", "practice"):
+                        st.session_state.pop(k, None)
+                    st.session_state["practice_home"] = True
+                    st.session_state["_cleared_n"] = n
+                    st.rerun()
+
+            _clear_dialog()
 
     practice_ui.render(resume, jd)
     _attr = bank.attribution()

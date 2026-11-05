@@ -17,10 +17,13 @@ import re
 import time
 
 from . import claims as claims_mod
+from . import directions as dir_mod
+from . import simple as simple_mod
 from . import coach as coach_mod
 from . import review as review_mod
 from . import probe as probe_mod
 from . import rubric
+from .settings import temp as _t
 from .llm import LLMError, chat
 
 ROUNDS = 0          # 0 = 不限轮次（无限练习）；用户随时可以结束
@@ -268,13 +271,13 @@ def _acknowledges_limit(text: str) -> bool:
 
 
 _ANGLE_WORDS = {
-    "口径": ("口径", "怎么算", "分母", "定义", "怎么统计"),
-    "归因": ("归因", "确认是你", "排除", "对照", "对照组"),
-    "角色": ("亲手", "哪部分是你", "独立", "团队做的"),
-    "取舍": ("砍掉", "备选", "别的做法", "为什么选"),
-    "边界": ("失效", "什么情况下", "约束", "风险"),
+    "口径": ("口径", "怎么算", "分母", "定义", "怎么统计", "基线", "哪一版"),
+    "归因": ("归因", "确认是", "带来的", "排除", "对照", "同期", "别的改动"),
+    "角色": ("亲手", "哪部分是你", "独立", "团队做的", "拍板", "拍的板", "谁定", "谁决定", "是你自己"),
+    "取舍": ("砍掉", "备选", "别的做法", "为什么选", "取舍"),
+    "边界": ("失效", "什么情况下", "约束", "风险", "兜底", "最先崩", "崩在"),
     "机制": ("怎么实现", "原理", "链路", "具体怎么设计"),
-    "验证": ("验证", "怎么判断有效", "指标"),
+    "验证": ("验证", "怎么判断有效", "指标", "看哪个数"),
     "贡献": ("贡献", "各自", "拆", "增量"),
 }
 
@@ -405,6 +408,11 @@ class MiniInterview:
         self.intents: list[str] = []               # 每题的问题类型（决定用哪套固定清单）
         self.answers: list[str] = []
         self.evals: list[dict] = []               # 每轮回答的即时评价（三指标/纠错/润色）
+        self.fmt: int = 2                          # 存档格式：2 = 有方向（旧档为 0/1）
+        self.resume_key: str = ""                 # 这份对话对应哪份简历（换简历别串台）
+        self.directions: list[dict] = []          # 这段经历切出来的方向（小经历）
+        self.cur_dir: int = 0                     # 当前方向
+        self.q_dirs: list[int] = []               # 每个问题属于哪个方向
         self.idx = 0                 # 当前第几轮（0 起）
         self.finished = False
         self.report = None
@@ -423,33 +431,40 @@ class MiniInterview:
         if not name:
             self.error = "没有选中要面的经历"
             return False
+        import hashlib
+        self.resume_key = hashlib.md5((self.resume or "").encode("utf-8")).hexdigest()[:8]
         context = self.entry.get("context") or self.entry.get("evidence", "")
-        got = claims_mod.extract(name, context)
-        if got and got.get("claims"):
-            self.claims = got["claims"]
-            q = (got.get("question") or "").strip()
-            angle = "judgment"
-        else:                                        # 抽不出主张就退回旧的主问
-            data, _ = _ask(MAIN_PROMPT.format(name=name, context=context), 0.6)
+        dirs = dir_mod.split(name, context)
+        if dirs:
+            self.directions = dirs
+        hint = self._dir_hint() if self.directions else ""
+        res = simple_mod.next_question(name, context, self.jd,
+                                       [], [], variant="v9") if not hint else \
+            simple_mod.next_question(name, f"{hint}\n\n{hint}", self.jd, [], [], variant="v9")
+        q = (res or {}).get("question", "").strip()
+        angle = "judgment"
+        if not q:                                     # 兜底：老的主问
+            data, _ = _ask(MAIN_PROMPT.format(name=name, context=context), _t('question', 0.6))
             q = (data or {}).get("question", "").strip()
             angle = str((data or {}).get("angle", "")).strip().lower() or "judgment"
         if not q:
             self.error = "题目生成失败，请重试"
             return False
         self.questions = [q]
+        self.q_dirs = [0]
         self.intents = [ANGLE_MAP.get(angle, INTENTS[0][0])]
         self.answers = []
         self.idx = 0
         return True
 
     def answer(self, text: str) -> bool:
-        """记录一轮回答；还有主张没被证明就按缺口追问，证明完了或到上限就打分。"""
+        """记录一轮回答，再用 v8(v9) 生成下一问。"""
         text = (text or "").strip()
-        if not text or self.finished or not self.questions:
+        if not text:
             return False
         self.answers.append(text)
 
-        # 即时评价：这一轮说成什么样（三指标 + 逐句替换 + 润色）
+        # 即时评价：这一轮说成什么样（三指标 + 建议 + 参考答法）
         try:
             ev = coach_mod.check(self.questions[len(self.answers) - 1], text,
                                  intent=self.intents[len(self.answers) - 1]
@@ -458,110 +473,63 @@ class MiniInterview:
         except Exception as e:
             self.evals.append({"error": str(e)[:80]})
 
-        # 有主张：走"缺口驱动"；没主张：退回旧的固定追问
-        if self.claims:
-            history = [{"q": self.questions[i], "a": self.answers[i]}
-                       for i in range(min(len(self.questions), len(self.answers)))]
-            used = [a for a in (_angle_of(q) for q in self.questions[:-1]) if a]
-            res = probe_mod.next_probe(self.entry.get("name", ""), self.claims,
-                                       history, text, used_angles=used)
-            if res:
-                self.claim_status.append(res.get("statuses") or {})
-                if res.get("gap"):
-                    self.gaps.append(res["gap"])
-                exhausted = all(self.probed.get(str(i), 0) >= 2 for i in range(len(self.claims)))
-                if res.get("all_proven") or exhausted:
-                    # 对话练习没有终点：这套主张问透了，就换个角度再开一问
-                    nxt = self._new_angle_question()
-                    if nxt:
-                        self.questions.append(nxt)
-                        self.intents.append("why_do")
-                        self.idx = len(self.answers)
-                        self.touch()
-                        return True
-                q = (res.get("question") or "").strip()
-                if q:
-                    if _is_generic(q) or not q:
-                        q = _gap_question(res.get("gap") or {}, text)
-                    else:
-                        q = self._review_and_fix(q, text, res.get("gap") or {})
-
-                gap = res.get("gap") or {}
-                idx = gap.get("index")
-                if isinstance(idx, int) and idx >= 0:
-                    self.probed[str(idx)] = self.probed.get(str(idx), 0) + 1
-
-                # 他已经承认这块做不到严格验证 → 不再追问"怎么排除"，改问"当时实际怎么判断的"
-                locked = False
-                if isinstance(idx, int) and idx >= 0 and _acknowledges_limit(text):
-                    self.limited[str(idx)] = True
-                    q = "你说这块没法严格验证——那当时你实际是怎么判断这个改动有效的？"
-                    locked = True
-
-                # 重复追问同一个点（或同一主张已追两次）→ 换一条主张
-                # 追问一定要先"接住"他说的话；没接住就用他的原话补一个开头
-                if q and not any(k in q for k in ("你说", "你提到", "你刚才", "「")):
-                    ph = salient(text)
-                    if ph:
-                        q = f"你说「{ph[0]}」，" + q
-
-                if q and not locked and _angle_of(q) and used.count(_angle_of(q)) >= 2 + 1:
-                    alt_angle = next((a for a in _ANGLE_WORDS if a not in used), "")
-                    if alt_angle:
-                        q = _GAP_TPL_BY_ANGLE.get(alt_angle, q)
-
-                if q and not locked and (_too_similar(q, self.questions)
-                                         or _same_numbers(q, self.questions)
-                                         or (isinstance(idx, int) and self.probed.get(str(idx), 0) > 2)):
-                    alt = self._switch_claim(gap, text)
-                    if alt:
-                        q = alt
-
-                # 换到另一条主张时，先说一句收束，别像翻简历
-                prev_idx = self.gaps[-2].get("index") if len(self.gaps) >= 2 else None
-                if isinstance(idx, int) and prev_idx is not None and idx != prev_idx:
-                    q = "这块我大概清楚了，换一个问问——" + q
-                    self.questions.append(q)
-                    self.intents.append("why_this")
-                    self.idx = len(self.answers)
-                    self.touch()
-                    return True
-
-        it = min(len(self.answers), len(INTENTS) - 1)      # 轮次上限 4 > 意图数 3，取最后一个兜底
-        key, intent_name, intent_desc = INTENTS[it]
-        data, _ = _ask(FOLLOWUP_PROMPT.format(
-            round_no=len(self.answers) + 1,
-            name=self.entry.get("name", ""),
-            context=self.entry.get("context") or self.entry.get("evidence", ""),
-            last_question=self.questions[-1],
-            last_answer=text,
-            intent_name=intent_name,
-            intent_desc=intent_desc,
-        ), 0.6)
-        q = (data or {}).get("question", "").strip()
+        q = self._next_question()
         if not q:
-            self.error = "追问生成失败，这一轮可以重试"
+            self.error = "下一问生成失败，这一轮可以重试"
             self.answers.pop()
+            self.evals.pop()
             return False
 
-        if not quotes_answer(q, text):
-            retry, _ = _ask(FOLLOWUP_PROMPT.format(
-                round_no=len(self.answers) + 1,
-                name=self.entry.get("name", ""),
-                context=self.entry.get("context") or self.entry.get("evidence", ""),
-                last_question=self.questions[-1],
-                last_answer=text,
-                intent_name=intent_name,
-                intent_desc=intent_desc + "｜**必须原样引用候选人说过的 4–12 个字**，用「」括起来",
-            ), 0.5)
-            q2 = (retry or {}).get("question", "").strip()
-            q = q2 if q2 and quotes_answer(q2, text) else _fallback_followup(text, key)
-
         self.questions.append(q)
-        self.intents.append(key)
+        self.q_dirs.append(self.cur_dir)
+        self.intents.append("why_this")
         self.idx = len(self.answers)
         self.touch()
         return True
+
+    def _next_question(self) -> str:
+        """v8 出题 + 去重护栏（与历史问题太像就重写一次，再不行用方向模板）。"""
+        name = self.entry.get("name", "")
+        ctx = self._dir_hint() or (self.entry.get("context") or self.entry.get("evidence", ""))
+        hist = [{"q": self.questions[i], "a": self.answers[i]}
+                for i in range(min(len(self.questions), len(self.answers)))]
+        hist = hist[-3:]
+        asked = self.questions[-8:]
+
+        res = simple_mod.next_question(name, ctx, self.jd, hist, asked, variant="v8")
+        q = (res or {}).get("question", "").strip()
+
+        # 角度去重：和上一问同一角度就重写一次
+        last_angle = _angle_of(self.questions[-1]) if self.questions else ""
+        if q and last_angle and _angle_of(q) == last_angle:
+            res2 = simple_mod.next_question(
+                name, ctx, self.jd, hist,
+                asked + [f"（上一问已经在问「{last_angle}」，这一问必须换一个角度）"],
+                variant="v8")
+            q2 = (res2 or {}).get("question", "").strip()
+            if q2 and _angle_of(q2) != last_angle:
+                q = q2
+            else:
+                # 重写也换不过来 → 用没用过的角度模板兜一个
+                used = {_angle_of(x) for x in self.questions[-3:]}
+                alt = next((a for a in _GAP_TPL_BY_ANGLE if a not in used), "")
+                if alt:
+                    q = _GAP_TPL_BY_ANGLE[alt]
+
+        if q and _too_similar(q, self.questions):
+            res2 = simple_mod.next_question(
+                name, ctx, self.jd, hist,
+                asked + ["（上面这几问已经被判重复，必须换一个完全不同的点）"],
+                variant="v8")
+            q2 = (res2 or {}).get("question", "").strip()
+            q = q2 if q2 and not _too_similar(q2, self.questions) else ""
+        if not q:
+            d = self.directions[self.cur_dir] if self.directions else {}
+            q = _TYPE_QUESTION.get("judgment", "这件事里，哪个决定是你自己拍的板？")
+            if d.get("result"):
+                q = f"你说「{d.get('result','')[:18]}」，这中间哪一步是你自己拍板的？"
+        return q
+
 
     def _proven_count(self) -> int:
         if not self.claim_status:
@@ -616,13 +584,38 @@ class MiniInterview:
             return "每条主张都问过两遍了"
         return ""
 
+    def _dir_hint(self) -> str:
+        if not self.directions:
+            return ""
+        d = self.directions[self.cur_dir]
+        return f"{d['name']}（问题：{d.get('problem','')}｜动作：{d.get('action','')}｜结果：{d.get('result','')}）"
+
+    def switch_direction(self, i: int) -> bool:
+        """换一个方向，用 v9 围绕新方向出第一问。"""
+        if not (0 <= i < len(self.directions)) or i == self.cur_dir:
+            return False
+        self.cur_dir = i
+        d = self.directions[i]
+        ctx = (f"【只问这个方向】{d['name']}：问题={d.get('problem','')}；"
+               f"动作={d.get('action','')}；结果={d.get('result','')}。原文：{d.get('source','')}")
+        res = simple_mod.next_question(self.entry.get("name", ""), ctx, self.jd,
+                                       [], self.questions[-6:], variant="v9")
+        q = (res or {}).get("question", "").strip()
+        if not q or _too_similar(q, self.questions):
+            q = f"你说的「{d['name']}」这件事，当时最初是怎么判断要做的？"
+        self.questions.append(q)
+        self.q_dirs.append(i)
+        self.intents.append("why_do")
+        self.touch()
+        return True
+
     def _new_angle_question(self) -> str:
         """主张聊透了之后，换一个新角度继续问（不让对话结束）。"""
         asked = "；".join(self.questions[-6:])
         data, _ = _ask(MAIN_PROMPT.format(
             name=self.entry.get("name", ""),
             context=(self.entry.get("context") or self.entry.get("evidence", "")),
-        ), 0.7)
+        ), _t('question', 0.7))
         q = (data or {}).get("question", "").strip()
         if not q or q in self.questions:
             q = "这段经历里，如果让你现在重做一遍，你会最先改哪一步？为什么？"
@@ -728,7 +721,7 @@ class MiniInterview:
 
     # ---------------------------------------------------------------- 序列化
 
-    _FIELDS = ("entry", "resume", "jd", "questions", "claims", "claim_status", "gaps", "evals",
+    _FIELDS = ("entry", "resume", "jd", "questions", "claims", "claim_status", "gaps", "evals", "directions", "cur_dir", "q_dirs", "resume_key", "fmt",
                "intents", "answers", "idx", "finished",
                "report", "error", "session_id", "created_at", "updated_at")
 
@@ -738,13 +731,21 @@ class MiniInterview:
     @classmethod
     def from_dict(cls, d: dict) -> "MiniInterview":
         m = cls(entry=d.get("entry") or {}, resume=d.get("resume", ""), jd=d.get("jd", ""))
+        m.fmt = 0                       # 旧档默认 0；文件里带了才用文件的值
         for k in cls._FIELDS:
             if k in d:
                 setattr(m, k, d[k])
         # 旧版本存档可能缺字段/类型不对：这里统一兜底，坏档不能让首页起不来
-        for k in ("questions", "claims", "claim_status", "gaps", "evals", "intents", "answers"):
+        for k in ("questions", "claims", "claim_status", "gaps", "evals",
+                  "directions", "q_dirs", "intents", "answers"):
             if not isinstance(getattr(m, k, None), list):
                 setattr(m, k, [])
+        if not isinstance(getattr(m, "cur_dir", None), int):      # 标量字段别被当列表清掉
+            m.cur_dir = 0
+        if not isinstance(getattr(m, "resume_key", None), str):
+            m.resume_key = ""
+        if not isinstance(getattr(m, "fmt", None), int):
+            m.fmt = 0
         try:
             # JSON 存盘会把 int 键变成字符串，读回来统一转回 int
             m.claim_status = [{int(k): v for k, v in (st or {}).items()} for st in m.claim_status]
@@ -769,11 +770,34 @@ def _dir() -> str:
     return scope.user_dir("mini")
 
 
+def _mark_current(session_id: str) -> None:
+    """记下"当前正在看的那一场"，刷新后优先恢复到它。"""
+    try:
+        with open(os.path.join(_dir(), "_current.json"), "w", encoding="utf-8") as f:
+            json.dump({"id": session_id}, f)
+    except OSError:
+        pass
+
+
+def current():
+    """刷新后优先恢复的那一场（_current.json 指向）。"""
+    path = os.path.join(_dir(), "_current.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            sid = json.load(f).get("id", "")
+    except (OSError, json.JSONDecodeError):
+        return None
+    return load(sid) if sid else None
+
+
 def save(m: MiniInterview) -> str:
     os.makedirs(_dir(), exist_ok=True)
     path = os.path.join(_dir(), f"{m.session_id}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(m.to_dict(), f, ensure_ascii=False, indent=2)
+    _mark_current(m.session_id)
     return path
 
 
@@ -796,7 +820,7 @@ def latest():
         return None
     files = sorted(os.listdir(_dir()), reverse=True)
     for name in files:
-        if name.endswith(".json"):
+        if name.endswith(".json") and not name.startswith("_"):
             m = load(name[:-5])
             if m is not None:
                 return m
@@ -814,3 +838,16 @@ def find_for(entry_name: str):
         if m is not None and (m.entry or {}).get("name") == entry_name:
             return m
     return None
+
+
+def clear_history() -> int:
+    """清空所有对话练习记录（含当前指针）。返回删除的文件数。"""
+    import glob
+    n = 0
+    for p in glob.glob(os.path.join(_dir(), "*.json")):
+        try:
+            os.remove(p)
+            n += 1
+        except OSError:
+            pass
+    return n

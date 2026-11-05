@@ -86,6 +86,20 @@ def _detail_html(ev: dict) -> str:
     issues = ev.get("issues") or []
     parts = ["<div class='tk-detail'>"]
 
+    if ev.get("error"):
+        parts.append("这轮评价没生成（服务异常），你的回答已经保存。")
+        parts.append("</div>")
+        return "".join(parts)
+    if not ev:
+        parts.append("这轮还没生成评价。点开重试，或者继续答下一轮。")
+        parts.append("</div>")
+        return "".join(parts)
+
+    hints = ev.get("hints") or []
+    if hints:
+        parts.append("<b>可以从这几方面说说</b>")
+        parts.append("<ul style='margin:6px 0 0 18px;padding:0'>"
+                     + "".join(f"<li>{_esc(h)}</li>" for h in hints) + "</ul>")
     if issues:
         parts.append(f"<b>问题（{len(issues)} 条，按严重程度）</b>")
         rows = []
@@ -97,7 +111,7 @@ def _detail_html(ev: dict) -> str:
                 f"{_esc(it.get('say',''))}</div></li>"
             )
         parts.append(f"<ol style='margin:8px 0 0 18px;padding:0'>{''.join(rows)}</ol>")
-    else:
+    elif not ev.get("unscored"):
         parts.append("这轮没发现明显问题，可以继续往深处问。")
 
     if ev.get("model_answer"):
@@ -146,8 +160,82 @@ def _unused_toggle_param() -> None:
     st.rerun()
 
 
+def _rounds_in(mini, i: int) -> int:
+    return sum(1 for x in (getattr(mini, "q_dirs", []) or []) if x == i)
+
+
+def _do_switch(mini, i: int) -> None:
+    analytics.track("direction_switch", to=i + 1, frm=mini.cur_dir + 1)
+    with st.spinner("正在围绕新方向出题……"):
+        mini.switch_direction(i)
+        mini_mod.save(mini)
+    st.session_state.pop("tk_pending_switch", None)
+    st.rerun()
+
+
+def _clear_dir_row(mini) -> None:
+    """当前方向底部：清空这个方向的记录（不影响别的方向）。"""
+    c1, c2 = st.columns([6, 1])
+    if c2.button("清空", key="tk_clear_dir", type="tertiary", help="清空当前方向的记录"):
+        st.session_state["tk_confirm_clear_dir"] = True
+    if st.session_state.get("tk_confirm_clear_dir"):
+        d = mini.directions[min(mini.cur_dir, len(mini.directions) - 1)]
+
+        @st.dialog("清空这个方向的记录？")
+        def _dlg():
+            st.caption(f"只清空「{d['name']}」，其它方向保留。")
+            a, b = st.columns(2)
+            if a.button("取消", use_container_width=True):
+                st.session_state.pop("tk_confirm_clear_dir", None)
+                st.rerun()
+            if b.button("确认清空", type="primary", use_container_width=True):
+                mini.clear_direction(mini.cur_dir)
+                import core.mini as _m
+                _m.save(mini)
+                analytics.track("clear_direction", idx=mini.cur_dir + 1)
+                st.session_state.pop("tk_confirm_clear_dir", None)
+                st.rerun()
+
+        _dlg()
+
+
+def _direction_row(mini, dirs: list[dict]) -> None:
+    """方向列表常驻：每个方向一个按钮，当前方向高亮，点未满 2 轮的先提醒。"""
+    cols = st.columns(max(len(dirs), 1))
+    for i, d in enumerate(dirs):
+        n = _rounds_in(mini, i)
+        mark = "●" if i == mini.cur_dir else "○"
+        label = f"{mark} {i + 1}. {d['name']}" + (f"（{n}）" if n else "")
+        if cols[i].button(label, key=f"tk_dir_{i}", use_container_width=True,
+                          type="primary" if i == mini.cur_dir else "secondary",
+                          disabled=(i == mini.cur_dir)):
+            if _rounds_in(mini, mini.cur_dir) < 2:
+                st.session_state["tk_pending_switch"] = i
+                st.rerun()
+            else:
+                _do_switch(mini, i)
+
+
+def _confirm_switch(mini) -> None:
+    """当前方向没聊满 2 轮时，先提醒一句。"""
+    pending = st.session_state.get("tk_pending_switch")
+
+    @st.dialog("这个方向才聊了 %d 轮" % _rounds_in(mini, mini.cur_dir))
+    def _confirm():
+        st.caption("再答一两轮会挖得更深；当然现在换也可以。")
+        c1, c2 = st.columns(2)
+        if c1.button("再练一轮", use_container_width=True):
+            st.session_state.pop("tk_pending_switch", None)
+            st.rerun()
+        if c2.button("仍然换方向", type="primary", use_container_width=True):
+            _do_switch(mini, pending)
+
+    _confirm()
+
+
 def render(mini, on_exit=None) -> None:
     st.markdown(CSS, unsafe_allow_html=True)
+    dirs = getattr(mini, "directions", []) or []
 
     c1, c2, c3 = st.columns([1, 6, 2])
     if c1.button("←", use_container_width=True, key="tk_back"):
@@ -157,19 +245,29 @@ def render(mini, on_exit=None) -> None:
         if on_exit:
             on_exit()
         return
-    c2.markdown("<div class='tk-top'><span><span class='tk-avatar'></span>"
-                "<span class='tk-name'>AI 面试官</span></span></div>", unsafe_allow_html=True)
     with c3:
         st.caption(f"第 {len(mini.answers) + 1} 轮")
+
 
     st.markdown(f"<div class='tk-time'>{mini.entry.get('name','')} · 对话练习</div>",
                 unsafe_allow_html=True)
 
+    if dirs:
+        _direction_row(mini, dirs)
+        _clear_dir_row(mini)
+        if st.session_state.get("tk_pending_switch") is not None:
+            _confirm_switch(mini)
+
     for i, q in enumerate(mini.questions):
+        qd = mini.q_dirs[i] if i < len(getattr(mini, "q_dirs", [])) else 0
+        if dirs and qd != mini.cur_dir:
+            continue          # 只显示当前方向的对话；别的方向的数据仍在存档里
+        if i >= len(mini.answers) and i < len(mini.questions) - 1:
+            continue          # 换方向时被丢下、没答的旧问题不显示
         # ---- AI 提问 ----
         st.markdown(f"<div class='tk-ai'>{_esc(q)}</div>", unsafe_allow_html=True)
         if i >= len(mini.answers):
-            break
+            continue
 
         # ---- 用户回答（浅绿气泡）----
         ev = mini.evals[i] if i < len(mini.evals) else {}
@@ -191,7 +289,8 @@ def render(mini, on_exit=None) -> None:
                 st.session_state[key] = not opened
                 st.rerun()
         with cr:
-            _chips(ev)
+            if ev.get("metrics"):
+                _chips(ev)
         analytics.track("eval_shown", round=i + 1,
                         issues=len(ev.get("issues") or []))
 

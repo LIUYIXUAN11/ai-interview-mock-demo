@@ -316,17 +316,12 @@ def render_home(resume: str, jd: str) -> None:
                         st.session_state["practice_home"] = False
                         st.rerun()
 
-                    # 每张卡都是同一套按钮：主按钮「开始练习」（未完成就续上）
-                    if unfinished:
-                        c1, c2 = st.columns([2, 1])
-                        if c1.button("开始练习", key=f"mini_go_{cat}_{i}", type="primary",
-                                     use_container_width=True):
+                    # 只保留一个按钮：未完成就续上，否则新开
+                    if st.button("开始练习", key=f"mini_go_{cat}_{i}", type="primary",
+                                 use_container_width=True):
+                        if unfinished:
                             enter(prev)
-                        if c2.button("重新开始", key=f"mini_redo_{cat}_{i}", use_container_width=True):
-                            start_fresh()
-                    else:
-                        if st.button("开始练习", key=f"mini_go_{cat}_{i}", type="primary",
-                                     use_container_width=True):
+                        else:
                             start_fresh()
 
 
@@ -529,6 +524,8 @@ def restore() -> None:
     if st.session_state.get("mini"):
         return
     if st.session_state.get("practice_home"):
+        return
+    if st.session_state.get("force_parse"):
         return
     try:
         m = mini_mod.latest()

@@ -7,6 +7,7 @@
 import json
 import re
 
+from .settings import temp as _t
 from .llm import LLMError, chat
 
 REVIEW_PROMPT = """你是面试官团队的审稿人。判断下面这个追问**能不能发出去**。
@@ -33,7 +34,7 @@ def check(question: str, name: str, last_q: str, last_a: str) -> dict:
     try:
         raw, _ = chat([{"role": "user", "content": REVIEW_PROMPT.format(
             name=name, last_q=last_q or "（无）", last_a=last_a or "（无）", question=question
-        )}], temperature=0.0, json_mode=True)
+        )}], temperature=_t('review', 0.0), json_mode=True)
     except LLMError:
         return {"ok": True, "reason": "", "fix_hint": ""}
 

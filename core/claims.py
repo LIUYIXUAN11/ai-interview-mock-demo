@@ -12,6 +12,7 @@ import json
 import re
 
 from .exemplars import as_prompt
+from .settings import temp as _t
 from .llm import LLMError, chat
 
 CLAIM_PROMPT = """你在准备一场产品经理面试。候选人选了简历里的这段经历：
@@ -114,7 +115,7 @@ def extract(name: str, context: str) -> dict:
     try:
         raw, _ = chat([{"role": "user", "content": CLAIM_PROMPT.format(
             name=name, context=context[:1500], exemplars=as_prompt())}],
-                      temperature=0.0, json_mode=True)
+                      temperature=_t('claims', 0.0), json_mode=True)
     except LLMError:
         return {}
 

@@ -9,11 +9,13 @@ import json
 import re
 
 from .exemplars import as_prompt
+from .settings import temp as _t
 from .llm import LLMError, chat
 
 PROBE_PROMPT = """你是产品经理面试官，正在追问。
 
 【这段经历】{name}
+【当前方向】{direction}
 【待验证的主张】
 {claims}
 
@@ -38,7 +40,8 @@ PROBE_PROMPT = """你是产品经理面试官，正在追问。
      改为问"那你当时实际是怎么判断这个改动有效的"；
    - **只问"他当时实际怎么做的"，不问"应该怎么做 / 最佳实践 / 阈值多少才算对"**（那是考知识，不是验证经历）。
 
-   **换个角度问**：如果下面列出的角度已经问过两次以上，就换一个没问过的角度。
+   - **只在「当前方向」内提问**：这个方向没聊完就别跳到别的事；
+   - **换个角度问**：如果下面列出的角度已经问过两次以上，就换一个没问过的角度。
    已用角度：{used}
    可选角度：口径 / 归因 / 角色 / 取舍 / 边界 / 机制 / 验证 / 贡献
 
@@ -69,7 +72,7 @@ def _norm(s: str) -> str:
 
 
 def next_probe(name: str, claims: list, history: list[dict], last_answer: str,
-               used_angles: list | None = None) -> dict:
+               used_angles: list | None = None, direction: str = "") -> dict:
     """返回 {statuses, all_proven, gap, question}；失败返回 {}。"""
     if not claims:
         return {}
@@ -83,10 +86,11 @@ def next_probe(name: str, claims: list, history: list[dict], last_answer: str,
 
     try:
         raw, _ = chat([{"role": "user", "content": PROBE_PROMPT.format(
-            name=name, claims=claim_lines, history=hist_lines,
+            name=name, direction=direction or "（整段经历）",
+            claims=claim_lines, history=hist_lines,
             exemplars=as_prompt(), last_answer=last_answer,
             used="、".join(used_angles or []) or "（还没有）"
-        )}], temperature=0.0, json_mode=True)
+        )}], temperature=_t('probe', 0.0), json_mode=True)
     except LLMError:
         return {}
 
