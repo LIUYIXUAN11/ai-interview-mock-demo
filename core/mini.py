@@ -464,16 +464,25 @@ class MiniInterview:
             return False
         self.answers.append(text)
 
-        # 即时评价：这一轮说成什么样（三指标 + 建议 + 参考答法）
-        try:
-            ev = coach_mod.check(self.questions[len(self.answers) - 1], text,
-                                 intent=self.intents[len(self.answers) - 1]
-                                 if len(self.intents) >= len(self.answers) else "")
-            self.evals.append(ev or {})
-        except Exception as e:
-            self.evals.append({"error": str(e)[:80]})
+        # 评价 + 出下一题：两件事互不依赖，并行跑（延迟取较慢的那个）
+        from concurrent.futures import ThreadPoolExecutor
 
-        q = self._next_question()
+        def _eval():
+            try:
+                return coach_mod.check(
+                    self.questions[len(self.answers) - 1], text,
+                    intent=self.intents[len(self.answers) - 1]
+                    if len(self.intents) >= len(self.answers) else "")
+            except Exception as e:
+                return {"error": str(e)[:80]}
+
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_ev = ex.submit(_eval)
+            f_q = ex.submit(self._next_question)
+            ev = f_ev.result()
+            q = f_q.result()
+
+        self.evals.append(ev or {})
         if not q:
             self.error = "下一问生成失败，这一轮可以重试"
             self.answers.pop()

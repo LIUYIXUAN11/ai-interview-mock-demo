@@ -105,3 +105,6 @@ def describe_for_prompt() -> str:
         lows = "、".join(d["low"])
         lines.append(f"- {d['name']}：命中信号={highs}；扣分信号={lows}")
     return "\n".join(lines)
+
+# 兜底：intent 缺失或拼错时用这套，避免 KeyError 把整个评价打挂
+ELEMENT_SETS["default"] = ELEMENT_SETS["why_do"]

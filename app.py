@@ -137,9 +137,51 @@ def ensure_key():
         st.stop()
 
 
-# ---------------------------------------------------------------- 顶部页签：练习 / 模拟面试
-mode = st.segmented_control("模式", ["练习", "模拟面试"], default="练习",
-                            label_visibility="collapsed", key="mode") or "练习"
+# ---------------------------------------------------------------- 顶部：主入口 + 更多
+st.markdown("""<style>
+  /* 侧栏收起按钮：做大 + 加文字 + 用主色，一眼能看到 */
+  [data-testid="stSidebarCollapseButton"],
+  [data-testid="stSidebarCollapseButton"] button {
+      visibility: visible !important; opacity: 1 !important;
+  }
+  [data-testid="stSidebarCollapseButton"] button {
+      width: auto !important; min-width: 92px; height: 40px !important;
+      border-radius: 20px; background: #FF4B4B !important;
+      border: none !important; box-shadow: 0 2px 8px rgba(255,75,75,.35);
+      padding: 0 14px; display: flex; align-items: center; gap: 6px;
+  }
+  [data-testid="stSidebarCollapseButton"] button:hover { background: #e63e3e !important; }
+  [data-testid="stSidebarCollapseButton"] button svg { width: 18px; height: 18px; fill: #fff; color: #fff; }
+  [data-testid="stSidebarCollapseButton"] button::after {
+      content: "收起设置"; color: #fff; font-size: 14px; font-weight: 600;
+  }
+
+  /* 收起之后，用来重新打开的那个小按钮也要显眼 */
+  [data-testid="collapsedControl"] button,
+  [data-testid="stSidebarCollapsedControl"] button {
+      width: auto !important; min-width: 84px; height: 40px !important;
+      border-radius: 20px; background: #FF4B4B !important; border: none !important;
+      box-shadow: 0 2px 8px rgba(255,75,75,.35);
+  }
+  [data-testid="collapsedControl"] button svg,
+  [data-testid="stSidebarCollapsedControl"] button svg { fill: #fff; color: #fff; width: 18px; height: 18px; }
+</style>""", unsafe_allow_html=True)
+
+mode = st.session_state.get("mode", "练习")
+_tl, _tr = st.columns([6, 1])
+with _tl:
+    st.markdown("#### " + ("练习" if mode == "练习" else "模拟面试"))
+with _tr:
+    with st.popover("更多", use_container_width=True):
+        if mode == "练习":
+            st.caption("想跑完整全流程（自我介绍→项目→开放→动机）？")
+            if st.button("完整模拟面试 →", use_container_width=True, key="go_interview"):
+                st.session_state["mode"] = "模拟面试"
+                st.rerun()
+        else:
+            if st.button("← 回到专项练习", use_container_width=True, key="go_practice"):
+                st.session_state["mode"] = "练习"
+                st.rerun()
 
 if PUBLIC_DEMO:
     st.caption("公开演示版 · 简历和面试记录只在本会话内可见；请勿上传身份证号等敏感信息。")
@@ -161,11 +203,11 @@ if mode == "练习":
 
     with st.sidebar:
         st.markdown("### 练习设置")
-        up = st.file_uploader("上传简历（PDF / Word / TXT / 图片）", type=["pdf", "docx", "txt", "jpg", "jpeg", "png"],
+        up = st.file_uploader("上传简历（PDF / Word / TXT / 图片）",
+                              type=["pdf", "docx", "txt", "jpg", "jpeg", "png"],
                               key="practice_upload")
         if up is not None:
             sig = f"{up.name}:{up.size}"
-            # 简历被清空后重新上传同一份文件时，p_sig 还停在上一个值，这里要能重新解析
             if st.session_state.get("p_sig") != sig or not st.session_state.get("resume_text"):
                 text, err = parse_upload(up)
                 st.session_state["p_sig"] = sig
@@ -174,21 +216,20 @@ if mode == "练习":
                     st.session_state["resume_text"] = text
                     st.session_state["resume_uid"] = profile.add_resume(text, up.name)
                     st.session_state.pop("practice", None)
-                    st.session_state.pop("projects_cache", None)   # 换了简历要重新解析
+                    st.session_state.pop("projects_cache", None)
                     st.session_state.pop("parse_done", None)
                 else:
                     st.warning(err)
 
         resume = st.session_state.get("resume_text", "")
 
-        # 示例简历（虚构）：没有简历的人也要能一键体验，所以放在 if resume 外面。
         if st.button("🎬 示例简历（虚构）· 一键体验", use_container_width=True,
                      help="用一份虚构的 AI 产品经理简历，直接开始练习"):
-            profile.set_active("")          # 别让上一份真实简历在下一页把示例覆盖掉
+            profile.set_active("")
             st.session_state["resume_text"] = demo_resume.DEMO_TEXT
             st.session_state["resume_uid"] = demo_resume.DEMO_ID
             st.session_state["from_demo"] = True
-            st.session_state["practice_home"] = True          # 不要恢复任何旧对话
+            st.session_state["practice_home"] = True
             for k in ("projects_cache", "mini", "practice", "p_sig", "upload_sig"):
                 st.session_state.pop(k, None)
             st.session_state["force_parse"] = True
@@ -228,25 +269,6 @@ if mode == "练习":
         else:
             st.caption("先上传简历，才能按经历出题")
         jd = st.text_area("目标岗位 JD（可选）", height=110, key="jd_input")
-
-        if st.session_state.get("confirm_clear"):
-            @st.dialog("清空所有练习记录？")
-            def _clear_dialog():
-                st.caption("会删除所有对话与练习记录，不可恢复。简历不受影响。")
-                c1, c2 = st.columns(2)
-                if c1.button("取消", use_container_width=True):
-                    st.session_state.pop("confirm_clear", None)
-                    st.rerun()
-                if c2.button("确认清空", type="primary", use_container_width=True):
-                    n = mini_mod.clear_history()
-                    st.session_state.pop("confirm_clear", None)
-                    for k in ("mini", "practice"):
-                        st.session_state.pop(k, None)
-                    st.session_state["practice_home"] = True
-                    st.session_state["_cleared_n"] = n
-                    st.rerun()
-
-            _clear_dialog()
 
     practice_ui.render(resume, jd)
     _attr = bank.attribution()

@@ -12,6 +12,7 @@
 
 import json
 import re
+import re
 
 from . import guards, rubric
 from .settings import temp as _t
@@ -161,6 +162,20 @@ def _extract_json(raw: str):
     return None
 
 
+def _meaningless(text: str) -> bool:
+    """判断这句话有没有信息量（不是靠字数）。"""
+    t = (text or "").strip()
+    if len(t) < 10:
+        return True
+    if len(set(t)) <= 3:                       # 「aaaaaaaaaa」「。。。。。。」
+        return True
+    if not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", t):   # 全是标点/符号
+        return True
+    if re.search(r"(.)\1{5,}", t):              # 同一个字重复 6 次以上
+        return True
+    return False
+
+
 def check(question: str, answer: str, stage: str = "project", intent: str = "",
           checkpoints: list[str] | None = None):
     """跑一次体检。失败返回 None（界面降级：提示重试，不阻塞）。
@@ -171,7 +186,7 @@ def check(question: str, answer: str, stage: str = "project", intent: str = "",
       highlight: {text, span, problem, fix, verified}
     """
     answer = (answer or "").strip()
-    if len(answer) < 10:
+    if _meaningless(answer):
         # 太短 = 没内容可评：不判"没问题"，也不批评，给几个可以展开的方向
         return {
             "status": {"code": "partial", "why": "只答了几个字", "quote": answer},
