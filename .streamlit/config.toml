@@ -1,0 +1,11 @@
+# 视觉系统：安静、可信的面试陪练
+# 主色 #2F7D73（低饱和青绿），浅色铺底，正文深墨绿
+[theme]
+primaryColor = "#2F7D73"
+backgroundColor = "#F7F9F8"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#243B36"
+font = "sans serif"
+
+[server]
+headless = true

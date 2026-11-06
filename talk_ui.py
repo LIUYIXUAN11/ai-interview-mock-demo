@@ -27,26 +27,28 @@ CSS = """
                display:inline-block; margin-right:8px; vertical-align:middle; }
   .tk-time { text-align:center; color:#bbb; font-size:12px; margin:10px 0; }
 
-  .tk-user { background:#d9f7be; border-radius:12px; padding:16px 16px 40px;
-             line-height:2.0; font-size:16px; margin:2px 0 0; }
-  .tk-user mark { background:#b7eb8f; border-radius:3px; padding:1px 2px; }
-  .tk-user mark.warn { background:#ffe7ba; }
+  .tk-user { background:#EAF4F1; border-radius:16px; padding:16px 16px 40px;
+             line-height:2.0; font-size:15.5px; color:#243B36; margin:2px 0 0;
+             border:1px solid #DCEAE5; }
+  .tk-user mark { background:#CFE8E2; border-radius:4px; padding:1px 2px; }
+  .tk-user mark.warn { background:#FDE8CF; }
   .tk-toggle, .tk-user a.tk-toggle { color:#9a9aa2 !important; font-size:13px;
       text-decoration:none !important; }
   .tk-toggle:hover { color:#666 !important; }
-  .tk-detail { margin-top:10px; padding-top:12px; border-top:1px dashed #c9c9d1;
-               font-size:15px; line-height:1.95; }
+  .tk-detail { margin-top:12px; padding-top:12px; border-top:1px dashed #CFDCD8;
+               font-size:15px; line-height:1.95; color:#243B36; }
 
-  .tk-ai { background:#f5f5f7; border-radius:12px; padding:16px; line-height:2.0;
-           font-size:16px; margin:14px 0 6px; }
+  .tk-ai { background:#FFFFFF; border:1px solid #E4ECEA; border-radius:16px;
+           padding:16px; line-height:2.0; font-size:15.5px; color:#243B36;
+           margin:16px 0 8px; }
 
   .tk-chips-wrap { text-align:right; margin:-30px 0 2px; }
   .tk-chips { display:inline-flex; gap:26px; padding:8px 16px;
               border:1px dashed #dcdce2; border-radius:10px; background:#fcfcfd; }
   .tk-chip { text-align:center; font-size:13px; line-height:1.5; }
-  .tk-chip b { font-size:14px; }
-  .tk-chip small { display:block; color:#aaa; font-size:11px; margin-top:1px; }
-  .tk-red { color:#f5222d; } .tk-green { color:#52c41a; } .tk-orange { color:#fa8c16; }
+  .tk-chip b { font-size:14.5px; }
+  .tk-chip small { display:block; color:#8A9B96; font-size:11.5px; margin-top:2px; }
+  .tk-red { color:#B4462F; } .tk-green { color:#2F7D73; } .tk-orange { color:#C2762B; }
   div[data-testid="stButton"] button[kind="tertiary"] {
       color:#9a9aa2; font-size:13px; padding:0 2px; min-height:0; height:auto;
       background:transparent; border:none; }
@@ -127,7 +129,7 @@ def _detail_html(ev: dict) -> str:
             rows.append(
                 "<li style='margin-bottom:10px'>"
                 f"{_esc(it.get('problem',''))}"
-                "<div style='color:#237804;margin-top:3px'>建议这样说："
+                "<div style='color:#2F7D73;margin-top:3px'>建议这样说："
                 f"{_esc(it.get('say',''))}</div></li>"
             )
         parts.append(f"<ol style='margin:8px 0 0 18px;padding:0'>{''.join(rows)}</ol>")

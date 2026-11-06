@@ -146,11 +146,11 @@ st.markdown("""<style>
   }
   [data-testid="stSidebarCollapseButton"] button {
       width: auto !important; min-width: 92px; height: 40px !important;
-      border-radius: 20px; background: #FF4B4B !important;
-      border: none !important; box-shadow: 0 2px 8px rgba(255,75,75,.35);
+      border-radius: 20px; background: #2F7D73 !important;
+      border: none !important; box-shadow: 0 2px 8px rgba(47,125,115,.35);
       padding: 0 14px; display: flex; align-items: center; gap: 6px;
   }
-  [data-testid="stSidebarCollapseButton"] button:hover { background: #e63e3e !important; }
+  [data-testid="stSidebarCollapseButton"] button:hover { background: #28685F !important; }
   [data-testid="stSidebarCollapseButton"] button svg { width: 18px; height: 18px; fill: #fff; color: #fff; }
   [data-testid="stSidebarCollapseButton"] button::after {
       content: "收起设置"; color: #fff; font-size: 14px; font-weight: 600;
@@ -160,8 +160,8 @@ st.markdown("""<style>
   [data-testid="collapsedControl"] button,
   [data-testid="stSidebarCollapsedControl"] button {
       width: auto !important; min-width: 84px; height: 40px !important;
-      border-radius: 20px; background: #FF4B4B !important; border: none !important;
-      box-shadow: 0 2px 8px rgba(255,75,75,.35);
+      border-radius: 20px; background: #2F7D73 !important; border: none !important;
+      box-shadow: 0 2px 8px rgba(47,125,115,.35);
   }
   [data-testid="collapsedControl"] button svg,
   [data-testid="stSidebarCollapsedControl"] button svg { fill: #fff; color: #fff; width: 18px; height: 18px; }

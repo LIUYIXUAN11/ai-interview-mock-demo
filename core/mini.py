@@ -340,7 +340,7 @@ _ANGLE_WORDS = {
     "角色": ("亲手", "哪部分是你", "独立", "团队做的", "拍板", "拍的板", "谁定", "谁决定", "是你自己"),
     "取舍": ("砍掉", "备选", "别的做法", "为什么选", "取舍"),
     "边界": ("失效", "什么情况下", "约束", "风险", "兜底", "最先崩", "崩在"),
-    "机制": ("怎么实现", "原理", "链路", "具体怎么设计"),
+    "机制": ("怎么实现", "原理", "链路", "具体怎么设计", "跑起来", "怎么运转"),
     "验证": ("验证", "怎么判断有效", "指标", "看哪个数"),
     "贡献": ("贡献", "各自", "拆", "增量"),
 }
@@ -477,6 +477,7 @@ class MiniInterview:
         self.directions: list[dict] = []          # 这段经历切出来的方向（小经历）
         self.cur_dir: int = 0                     # 当前方向
         self.q_dirs: list[int] = []               # 每个问题属于哪个方向
+        self.angles: list[str] = []               # 已经用过的提问角度（防止换角度时重复）
         self.retries: dict[str, dict] = {}        # 同题重答：{题号: {resolved, left, answer}}
         self.idx = 0                 # 当前第几轮（0 起）
         self.finished = False
@@ -559,9 +560,7 @@ class MiniInterview:
             elif kind == "need_structure":
                 q = _REASK_STRUCT + base_q
             else:
-                used = {_angle_of(x) for x in self.questions[-3:]}
-                prefer = ["角色", "机制", "边界", "贡献", "取舍"]
-                alt = next((a for a in prefer if a not in used), "机制")
+                alt = self._pick_angle(["角色", "机制", "边界", "贡献", "取舍"])
                 q = "换个角度：" + _GAP_TPL_BY_ANGLE.get(alt, "你当时具体做了哪几件事？")
         elif kind == "too_short":
             ev = _eval() or {}
@@ -575,9 +574,7 @@ class MiniInterview:
             ev["garbage"] = True
             ev.setdefault("raw", text[:20])
             # 垃圾回答不再重问同一题：换个角度，别让用户卡在一个问题上
-            used = {_angle_of(x) for x in self.questions[-3:]}
-            prefer = ["角色", "机制", "边界", "贡献", "取舍", "验证"]
-            alt = next((a for a in prefer if a not in used), "机制")
+            alt = self._pick_angle(["角色", "机制", "边界", "贡献", "取舍", "验证"])
             q = "换个角度：" + _GAP_TPL_BY_ANGLE.get(alt, "你当时具体做了哪几件事？")
         else:
             with ThreadPoolExecutor(max_workers=2) as ex:
@@ -626,6 +623,15 @@ class MiniInterview:
                                   "answer": text[:400], "ev": ev}
         self.touch()
         return True
+
+    def _pick_angle(self, prefer: list[str] | None = None) -> str:
+        """挑一个还没用过的角度，并记下来。"""
+        order = prefer or ["角色", "机制", "边界", "贡献", "取舍", "验证", "归因", "口径"]
+        used = set(self.angles[-6:])
+        pick = next((a for a in order if a not in used), "")
+        if pick:
+            self.angles.append(pick)
+        return pick
 
     def _expand_question(self, text: str) -> str:
         """太短的回答：顺着他的话拆开问，别丢掉他刚说的。"""
@@ -763,6 +769,7 @@ class MiniInterview:
         if not (0 <= i < len(self.directions)) or i == self.cur_dir:
             return False
         self.cur_dir = i
+        self.angles = []          # 换方向后角度重新开始
         self.questions.append(self._ask_direction(i))
         self.q_dirs.append(i)
         self.intents.append("why_do")
@@ -904,7 +911,7 @@ class MiniInterview:
 
     # ---------------------------------------------------------------- 序列化
 
-    _FIELDS = ("entry", "resume", "jd", "questions", "claims", "claim_status", "gaps", "evals", "directions", "cur_dir", "q_dirs", "resume_key", "fmt", "retries",
+    _FIELDS = ("entry", "resume", "jd", "questions", "claims", "claim_status", "gaps", "evals", "directions", "cur_dir", "q_dirs", "resume_key", "fmt", "retries", "angles",
                "intents", "answers", "idx", "finished",
                "report", "error", "session_id", "created_at", "updated_at")
 
