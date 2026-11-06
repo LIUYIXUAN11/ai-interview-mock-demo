@@ -140,6 +140,70 @@ SCORE_PROMPT = """你是刚才这场面试的面试官，现在要**逐轮**给�
 _KEEP = re.compile(r"[^\s，。、；：？！“”‘’（）《》【】,.!?;:\"'()\[\]{}<>—\-…·%]")
 
 
+_REASK = "（这句没答到）刚才那个问题再说一次："
+_REASK_RECALL = "（想不起来没关系）给你几个回忆线索再答："
+_REASK_STRUCT = "（不知道怎么讲也行）按这个顺序再讲一遍："
+
+
+def _clean_q(q: str) -> str:
+    """重问出来的题，喂给模型时要把"重问"前缀去掉，否则模型会以为那是题目内容。"""
+    q = q or ""
+    for p_ in (_REASK, _REASK_RECALL, _REASK_STRUCT):
+        if q.startswith(p_):
+            return q[len(p_):]
+    return q
+
+
+
+# ---------------------------------------------------------------- 回答类型（规则层）
+_NONE_WORDS = ("没做过", "没参与", "不是我负责", "不负责", "没经历过", "没接触过", "不是我做", "没有相关经历")
+_RECALL_WORDS = ("记不清", "忘了", "想不起来", "记不得", "不太记得", "没印象")
+_STRUCT_WORDS = ("不知道怎么说", "不知道怎么开口", "不知道该怎么说", "不知道怎么组织", "不知道怎么讲")
+_UNKNOWN_WORDS = ("不知道", "不清楚", "不了解", "不确定", "说不上来")
+
+
+def answer_kind(text: str) -> str:
+    """规则层：先分边界，再判垃圾。0 延迟、可测。"""
+    t = (text or "").strip()
+    if any(w in t for w in _NONE_WORDS):
+        return "boundary_none"
+    if any(w in t for w in _RECALL_WORDS):
+        return "boundary_recall"
+    if any(w in t for w in _STRUCT_WORDS):
+        return "need_structure"
+    if any(w in t for w in _UNKNOWN_WORDS):
+        return "boundary_unknown"
+    if len(t) <= 6:
+        has_cn = bool(__import__("re").search(r"[\u4e00-\u9fff]", t))
+        # 有汉字、且不是同一个字重复 → 是"太短"，不是垃圾（如「都是」「没有」「对」）
+        if has_cn and len(set(t)) >= 2:
+            return "too_short"
+        return "garbage"
+    if len(set(t)) <= 3 or not __import__("re").search(r"[\u4e00-\u9fffA-Za-z0-9]", t):
+        return "garbage"
+    return "ok"
+
+
+_BOUNDARY_HINTS = {
+    "boundary_unknown": [
+        "这题记为「证据不足」，不扣分——不知道就说不知道，比编一个更安全。",
+        "可以这样说：这个我不确定，我能确认的是 X；要回答这个问题，我需要查 Y。",
+    ],
+    "boundary_none": [
+        "这题记为「证据不足」，不扣分——你没做过，硬编反而更糟。",
+        "可以这样说：这块我没参与，我负责的是 X；能确认的是 Y，Z 需要找同事确认。",
+    ],
+    "boundary_recall": [
+        "先别急着给结论，想想那段时间：先发生了什么、谁提的、交付物是什么。",
+        "记不清的部分可以说不确定，但要把确定的那部分说清。",
+    ],
+    "need_structure": [
+        "给你一个顺序：① 要解决的问题 ② 你做的动作 ③ 结果和判断依据。",
+        "照着这个顺序说一遍就行，先不用追求说得多漂亮。",
+    ],
+}
+
+
 def _norm(s: str) -> str:
     return "".join(ch for ch in _KEEP.findall(s or "")).lower()
 
@@ -413,6 +477,7 @@ class MiniInterview:
         self.directions: list[dict] = []          # 这段经历切出来的方向（小经历）
         self.cur_dir: int = 0                     # 当前方向
         self.q_dirs: list[int] = []               # 每个问题属于哪个方向
+        self.retries: dict[str, dict] = {}        # 同题重答：{题号: {resolved, left, answer}}
         self.idx = 0                 # 当前第几轮（0 起）
         self.finished = False
         self.report = None
@@ -470,17 +535,56 @@ class MiniInterview:
         def _eval():
             try:
                 return coach_mod.check(
-                    self.questions[len(self.answers) - 1], text,
+                    _clean_q(self.questions[len(self.answers) - 1]), text,
                     intent=self.intents[len(self.answers) - 1]
                     if len(self.intents) >= len(self.answers) else "")
             except Exception as e:
                 return {"error": str(e)[:80]}
 
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            f_ev = ex.submit(_eval)
-            f_q = ex.submit(self._next_question)
-            ev = f_ev.result()
-            q = f_q.result()
+        kind = answer_kind(text)
+        base_q = _clean_q(self.questions[len(self.answers) - 1]) if self.questions else ""
+
+        if kind in _BOUNDARY_HINTS:
+            # 到达能力边界：不调模型、不计分，按类别给不同处理
+            ev = {
+                "unscored": True, "boundary": kind,
+                "boundary_label": {"boundary_none": "没做过", "boundary_unknown": "不知道",
+                                   "boundary_recall": "想不起", "need_structure": "不知道怎么说"}[kind],
+                "hints": _BOUNDARY_HINTS[kind], "issues": [], "metrics": [],
+                "one_line": "这题记为证据不足，不计分",
+                "facts": [], "model_answer": "", "replacements": [], "rewrite": "", "elements": [],
+            }
+            if kind == "boundary_recall":
+                q = _REASK_RECALL + base_q
+            elif kind == "need_structure":
+                q = _REASK_STRUCT + base_q
+            else:
+                used = {_angle_of(x) for x in self.questions[-3:]}
+                prefer = ["角色", "机制", "边界", "贡献", "取舍"]
+                alt = next((a for a in prefer if a not in used), "机制")
+                q = "换个角度：" + _GAP_TPL_BY_ANGLE.get(alt, "你当时具体做了哪几件事？")
+        elif kind == "too_short":
+            ev = _eval() or {}
+            ev.pop("garbage", None)          # 太短 ≠ 垃圾，别让界面说"没看出在回答"
+            ev["too_short"] = True
+            ev.setdefault("raw", text[:20])
+            q = self._expand_question(text)
+        elif kind == "garbage":
+            # 乱答/空答：不拿它当素材出题，直接重问原来那个问题
+            ev = _eval() or {}
+            ev["garbage"] = True
+            ev.setdefault("raw", text[:20])
+            # 垃圾回答不再重问同一题：换个角度，别让用户卡在一个问题上
+            used = {_angle_of(x) for x in self.questions[-3:]}
+            prefer = ["角色", "机制", "边界", "贡献", "取舍", "验证"]
+            alt = next((a for a in prefer if a not in used), "机制")
+            q = "换个角度：" + _GAP_TPL_BY_ANGLE.get(alt, "你当时具体做了哪几件事？")
+        else:
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f_ev = ex.submit(_eval)
+                f_q = ex.submit(self._next_question)
+                ev = f_ev.result()
+                q = f_q.result()
 
         self.evals.append(ev or {})
         if not q:
@@ -496,11 +600,54 @@ class MiniInterview:
         self.touch()
         return True
 
+    def reanswer(self, idx: int, text: str) -> bool:
+        """针对同一道题再答一次，并比较原来的问题有没有解决（不生成新题）。"""
+        text = (text or "").strip()
+        if not text or not (0 <= idx < len(self.questions)):
+            return False
+        ev = coach_mod.check(self.questions[idx], text,
+                             intent=self.intents[idx] if idx < len(self.intents) else "")
+        if not ev:
+            return False
+        before = (self.evals[idx].get("issues") or []) if idx < len(self.evals) else []
+        after = ev.get("issues") or []
+
+        def _kw(t: str) -> set[str]:
+            return {t[i:i + 4] for i in range(max(0, len(t) - 3))}
+
+        left = []
+        resolved = []
+        for it in before:
+            prob = it.get("problem", "")
+            hit = any(len(_kw(prob) & _kw(n.get("problem", ""))) >= 2 for n in after)
+            (left if hit else resolved).append(prob[:40])
+
+        self.retries[str(idx)] = {"resolved": resolved, "left": left,
+                                  "answer": text[:400], "ev": ev}
+        self.touch()
+        return True
+
+    def _expand_question(self, text: str) -> str:
+        """太短的回答：顺着他的话拆开问，别丢掉他刚说的。"""
+        base = _clean_q(self.questions[len(self.answers) - 1]) if self.questions else ""
+        prompt = (
+            "你是面试官。候选人刚才只回了很短一句，但方向是对的。请顺着他的话，问一个更具体的问题，"
+            "让他把这句话展开成事实。\n"
+            f"面试官的问题：{base}\n候选人的简短回答：{text}\n"
+            "要求：一句话，≤40 字；必须引用他的原话；不要问新的角度，只让他展开这一句。"
+            '只输出 JSON：{"question": "你的问题"}'
+        )
+        data, _ = _ask(prompt, _t("question", 0.5))
+        q = ((data or {}).get("question") or "").strip()
+        if q:
+            return q
+        return f"你刚说「{text[:12]}」，那就从这块展开一句：你具体做了什么、结果怎样？"
+
     def _next_question(self) -> str:
         """v8 出题 + 去重护栏（与历史问题太像就重写一次，再不行用方向模板）。"""
         name = self.entry.get("name", "")
         ctx = self._dir_hint() or (self.entry.get("context") or self.entry.get("evidence", ""))
-        hist = [{"q": self.questions[i], "a": self.answers[i]}
+        hist = [{"q": _clean_q(self.questions[i]), "a": self.answers[i]}
                 for i in range(min(len(self.questions), len(self.answers)))]
         hist = hist[-3:]
         asked = self.questions[-8:]
@@ -599,11 +746,8 @@ class MiniInterview:
         d = self.directions[self.cur_dir]
         return f"{d['name']}（问题：{d.get('problem','')}｜动作：{d.get('action','')}｜结果：{d.get('result','')}）"
 
-    def switch_direction(self, i: int) -> bool:
-        """换一个方向，用 v9 围绕新方向出第一问。"""
-        if not (0 <= i < len(self.directions)) or i == self.cur_dir:
-            return False
-        self.cur_dir = i
+    def _ask_direction(self, i: int) -> str:
+        """给某个方向生成第一问（换方向和清空后都用它）。"""
         d = self.directions[i]
         ctx = (f"【只问这个方向】{d['name']}：问题={d.get('problem','')}；"
                f"动作={d.get('action','')}；结果={d.get('result','')}。原文：{d.get('source','')}")
@@ -612,11 +756,41 @@ class MiniInterview:
         q = (res or {}).get("question", "").strip()
         if not q or _too_similar(q, self.questions):
             q = f"你说的「{d['name']}」这件事，当时最初是怎么判断要做的？"
-        self.questions.append(q)
+        return q
+
+    def switch_direction(self, i: int) -> bool:
+        """换一个方向，用 v9 围绕新方向出第一问。"""
+        if not (0 <= i < len(self.directions)) or i == self.cur_dir:
+            return False
+        self.cur_dir = i
+        self.questions.append(self._ask_direction(i))
         self.q_dirs.append(i)
         self.intents.append("why_do")
         self.touch()
         return True
+
+    def clear_direction(self, i: int) -> int:
+        """清空某个方向的全部问答；清完补一道新题，别让页面空着。"""
+        keep = [k for k, d in enumerate(getattr(self, "q_dirs", [])) if d != i]
+        removed = len(self.questions) - len(keep)
+        if removed <= 0:
+            return 0
+        self.questions = [self.questions[k] for k in keep]
+        self.q_dirs = [self.q_dirs[k] for k in keep]
+        if len(self.intents) >= len(keep):
+            self.intents = [self.intents[k] for k in keep]
+        self.answers = [self.answers[k] for k in keep if k < len(self.answers)]
+        self.evals = [self.evals[k] for k in keep if k < len(self.evals)]
+        self.idx = len(self.answers)
+
+        if self.directions and not any(d == i for d in self.q_dirs):
+            self.questions.append(self._ask_direction(i))
+            self.q_dirs.append(i)
+            self.intents.append("why_do")
+
+        self.touch()
+        return removed
+
 
     def _new_angle_question(self) -> str:
         """主张聊透了之后，换一个新角度继续问（不让对话结束）。"""
@@ -649,7 +823,7 @@ class MiniInterview:
             return q
 
         hint = rv.get("fix_hint") or "换个问法：抓住他刚说的一个点，问判断不问事实"
-        hist = [{"q": self.questions[i], "a": self.answers[i]}
+        hist = [{"q": _clean_q(self.questions[i]), "a": self.answers[i]}
                 for i in range(min(len(self.questions), len(self.answers)))]
         res2 = probe_mod.next_probe(self.entry.get("name", ""), self.claims, hist,
                                     last_answer + f"\n\n【上一版追问被退回：{hint}，请换个问法】")
@@ -730,7 +904,7 @@ class MiniInterview:
 
     # ---------------------------------------------------------------- 序列化
 
-    _FIELDS = ("entry", "resume", "jd", "questions", "claims", "claim_status", "gaps", "evals", "directions", "cur_dir", "q_dirs", "resume_key", "fmt",
+    _FIELDS = ("entry", "resume", "jd", "questions", "claims", "claim_status", "gaps", "evals", "directions", "cur_dir", "q_dirs", "resume_key", "fmt", "retries",
                "intents", "answers", "idx", "finished",
                "report", "error", "session_id", "created_at", "updated_at")
 

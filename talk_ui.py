@@ -95,6 +95,26 @@ def _detail_html(ev: dict) -> str:
         parts.append("</div>")
         return "".join(parts)
 
+    if ev.get("too_short"):
+        parts.append("<div style='margin-bottom:8px'>"
+                     "这次只答了几个字——方向对，展开一句就行。</div>")
+
+    if ev.get("garbage"):
+        raw = ev.get("raw") or ""
+        parts.append("<div style='margin-bottom:8px'>"
+                     f"你发的是「{_esc(raw)}」，我没看出它在回答这个问题。</div>")
+
+    if ev.get("boundary"):
+        parts.append("<div style='margin-bottom:8px'><b>这题不计分："
+                     + _esc(ev.get("boundary_label", "到达能力边界"))
+                     + "</b>　<span style='color:#888'>证据不足，不计入评分</span></div>")
+
+    examples = ev.get("examples") or []
+    if examples:
+        parts.append("<b>可以参考这样说</b>")
+        parts.append("<ul style='margin:6px 0 0 18px;padding:0'>"
+                     + "".join(f"<li>{_esc(x)}</li>" for x in examples) + "</ul>")
+
     hints = ev.get("hints") or []
     if hints:
         parts.append("<b>可以从这几方面说说</b>")
@@ -114,8 +134,15 @@ def _detail_html(ev: dict) -> str:
     elif not ev.get("unscored"):
         parts.append("这轮没发现明显问题，可以继续往深处问。")
 
+    if ev.get("needs_confirm"):
+        parts.append("<div style='margin-top:14px'><b>需要你确认的 "
+                     + str(len(ev["needs_confirm"])) + " 点</b><ul style='margin:6px 0 0 18px;padding:0'>"
+                     + "".join(f"<li>{_esc(x)}</li>" for x in ev["needs_confirm"])
+                     + "</ul><div style='color:#999;font-size:12px;margin-top:4px'>"
+                       "这些没说清之前，下面的参考说法只能当骨架，别直接背。</div></div>")
+
     if ev.get("model_answer"):
-        parts.append("<div style='margin-top:14px'><b>完整参考答法（可以直接背）</b><br>"
+        parts.append("<div style='margin-top:14px'><b>参考说法（你没说过的会标「待确认」）</b><br>"
                      + _esc(ev["model_answer"]) + "</div>")
         parts.append("<div style='color:#999;font-size:12px;margin-top:6px'>"
                      "（补你的数据）表示这里要用你真实的数字，系统不会替你编。</div>")
@@ -293,6 +320,30 @@ def render(mini, on_exit=None) -> None:
                 _chips(ev)
         analytics.track("eval_shown", round=i + 1,
                         issues=len(ev.get("issues") or []))
+
+        # 同题重答：只练这一个缺口
+        ridx = i
+        if st.session_state.get(f"tk_retry_open_{ridx}"):
+            again = st.text_area("只针对这一点，再答一次", key=f"tk_again_{ridx}", height=110,
+                                 placeholder="用两句话把刚才那个缺口补上，不用重讲整个项目……")
+            if st.button("提交重答", type="primary", key=f"tk_again_btn_{ridx}",
+                         disabled=not (again or "").strip()):
+                with st.spinner("正在对比这次有没有说清……"):
+                    mini.reanswer(ridx, again)
+                    mini_mod.save(mini)
+                st.rerun()
+        elif st.button("针对这一点再答一次", key=f"tk_retry_{ridx}", type="tertiary"):
+            st.session_state[f"tk_retry_open_{ridx}"] = True
+            st.rerun()
+
+        rr = (mini.retries or {}).get(str(ridx))
+        if rr:
+            good = rr.get("resolved") or []
+            bad = rr.get("left") or []
+            if good:
+                st.success("这次解决了：" + "；".join(good[:2]))
+            if bad:
+                st.info("还没说清：" + "；".join(bad[:2]))
 
     ans = st.chat_input("点击说话……（这里打字也可以）")
     if ans:

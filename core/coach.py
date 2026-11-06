@@ -70,8 +70,13 @@ PROMPT = """你是面试教练，正在给候选人的**一句话回答**做体�
    - problem 要点到具体的那句话，不写"缺乏数据支撑"这种空话；
    - say 必须是**能直接念出来的句子**，不是提示；
    - 按严重程度排序，最要命的放第一条；
-6. **给一段「完整参考答法」**（model_answer）：一段可以直接背的答法，
-   - 用他的真实经历和数字，**不许编造数字或指标**；缺的地方写「（补你的数据）」；
+6. **给一段「参考说法」**（model_answer）：**只能由他说过的事实拼成**。
+   - 他没说过的事实、因果、变量、实验、职责，一律不许写；
+   - 缺数据写「（补你的数据）」，但**不要替他编出任何情节**；
+   - 例：他说「89% 是团队周报的数，我没参与统计」→ 只能写「89% 来自团队周报，口径我还需要核实」，
+     **绝不能**写「上线前后只有这一个变量」；
+6b. **给 1–3 条「需要你确认」**（needs_confirm）：好答案需要、但他说不清的信息，一句话一条。
+   例：「这次改动前后，还有别的产品动作吗？」「89% 是谁统计的、分母是什么？」
 7. **给 1–3 条逐句替换**（像语法纠错那样可直接抄）：
    {{"from": "回答里的原句（逐字，必须能在回答里找到）", "to": "建议的说法"}}
    - **to 只能改表达**：换更准确的说法、补主语、去口语赘余；
@@ -104,6 +109,7 @@ PROMPT = """你是面试教练，正在给候选人的**一句话回答**做体�
     {{"problem": "只说了怎么算，没说为什么用这个口径", "say": "不用绝对成本，是因为业务方拿它做选型，两个方案参数量差 10 倍，只看成本没法比。"}}
   ],
   "model_answer": "我用的口径是每 1 元成本换回的效果百分点……（补你的数据）",
+  "needs_confirm": ["这次改动前后还有别的产品动作吗？", "89% 是谁统计的、分母是什么？"],
   "replacements": [{{"from": "所以做了优化", "to": "所以把注册入口从二级页提到首屏"}}],
   "rewrite": "这次改版是同期唯一的变量……",
   "root_cause": "数据缺失",
@@ -176,6 +182,40 @@ def _meaningless(text: str) -> bool:
     return False
 
 
+
+_NUM = __import__("re").compile(r"\d+(?:\.\d+)?%?")
+_ASSERT = ("只有", "唯一", "没有别的", "没有其他", "其他改动", "一定是", "全部是", "完全")
+
+
+def _verified_answer(text: str, answer: str, question: str) -> tuple[str, list[str]]:
+    """把模型给的"参考说法"过一遍：拿题目里的数字、替用户下断言，都不许留。
+
+    返回 (清洗后的参考说法, 新增的待确认条目)。
+    """
+    import re as _re
+
+    ans = (answer or "")
+    nums_ok = set(_NUM.findall(ans))
+    out, flags = [], []
+    for sent in _re.split(r"(?<=[。！？；])", text or ""):
+        s = sent.strip()
+        if not s:
+            continue
+
+        bad_nums = set(_NUM.findall(s)) - nums_ok
+        invented_claim = any(w in s and w not in ans for w in _ASSERT)
+
+        if invented_claim:
+            flags.append("参考说法里有句推断不是你说的，已删掉：" + s[:24])
+            continue
+        if bad_nums:
+            flags.append("参考说法里这些数字你没说过，需要你核实：" + "、".join(sorted(bad_nums)))
+            s = s.rstrip("。！？；") + "（待确认）"
+        out.append(s)
+
+    return "".join(out), flags
+
+
 def check(question: str, answer: str, stage: str = "project", intent: str = "",
           checkpoints: list[str] | None = None):
     """跑一次体检。失败返回 None（界面降级：提示重试，不阻塞）。
@@ -195,10 +235,15 @@ def check(question: str, answer: str, stage: str = "project", intent: str = "",
             "facts": [],
             "metrics": [],
             "issues": [],
+            "garbage": True,
             "hints": [
                 "当时看到了什么——数据、反馈、访谈里的一条都行",
                 "你为这件事做了什么动作，哪一步是你自己定的",
                 "结果怎样，你是怎么判断有效的",
+            ],
+            "examples": [
+                "比如你可以先说：「这个数我是从周报/后台看到的，当时注意到……」（补上你的来源）",
+                "再说：「所以我先做了……，结果是……」（补上你的动作和结果）",
             ],
             "model_answer": "",
             "replacements": [],
@@ -330,6 +375,8 @@ def check(question: str, answer: str, stage: str = "project", intent: str = "",
             repl.append({"from": frm[:60], "to": to[:80],
                          "verified": locate(answer, frm) is not None})
 
+    ma, ma_flags = _verified_answer(str(data.get("model_answer", ""))[:400], answer, question)
+
     issues = []
     for it in (data.get("issues") or [])[:3]:
         if not isinstance(it, dict):
@@ -342,7 +389,8 @@ def check(question: str, answer: str, stage: str = "project", intent: str = "",
     return {
         "one_line": str(data.get("one_line", ""))[:40],
         "issues": issues,
-        "model_answer": str(data.get("model_answer", ""))[:400],
+        "model_answer": ma,
+        "needs_confirm": (ma_flags + [str(x)[:60] for x in (data.get("needs_confirm") or [])])[:3],
         "metrics": metrics,
         "replacements": repl,
         "rewrite": str(data.get("rewrite", ""))[:200],
