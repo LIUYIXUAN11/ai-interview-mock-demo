@@ -125,6 +125,18 @@ def save_resume(text: str, filename: str = "") -> None:
     add_resume(text, filename)
 
 
+def onboarded() -> bool:
+    """是否已经看过新手引导（只显示一次）。"""
+    return bool(_read(_profile_path(), {}).get("onboarded"))
+
+
+def set_onboarded(v: bool = True) -> None:
+    p = _profile_path()
+    d = _read(p, {})
+    d["onboarded"] = bool(v)
+    _write(p, d)
+
+
 def load() -> dict:
     """旧的元信息接口（文件名/时间）。"""
     rid = active_id()

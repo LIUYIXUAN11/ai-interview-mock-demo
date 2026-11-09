@@ -16,6 +16,7 @@ from core import mini as mini_mod
 import talk_ui
 from core import analytics
 from core import practice as practice_mod
+from core import profile
 from core.mini import INTENTS, MiniInterview
 from core.practice import PracticeSession
 
@@ -543,7 +544,51 @@ def restore() -> None:
         st.info("已打开上一次面试的成绩单。")
 
 
+_ONBOARD = [
+    ("先选一段你想练的经历",
+     "左边列表里每一段实习或项目都能练。先挑一段你面试时最没底、或者最想讲清楚的。"),
+    ("像真面试一样回答，不用写完整",
+     "面试官问什么就答什么，说人话就行。答得短、答得乱都没关系，系统会告诉你怎么改。"),
+    ("看评价，不满意就再答一次",
+     "每轮回答下面直接给「问题 + 建议这样说」。点「再答一次」只练那一个缺口，不用重讲整个项目。"),
+]
+
+
+def render_onboarding() -> None:
+    """新手三步引导：只看一次，可跳过。"""
+    if profile.onboarded():
+        return
+    step = int(st.session_state.get("onboard_step", 0))
+    step = max(0, min(step, len(_ONBOARD) - 1))
+    title, body = _ONBOARD[step]
+
+    with st.container(border=True):
+        st.markdown(
+            f"<div style='color:#2F7D73;font-size:13px;font-weight:600'>"
+            f"新手引导 {step + 1}/{len(_ONBOARD)}</div>", unsafe_allow_html=True)
+        st.markdown(f"**{title}**")
+        st.caption(body)
+        c1, c2, c3 = st.columns([1, 1, 2])
+        if step > 0 and c1.button("上一步", key="ob_prev", use_container_width=True):
+            st.session_state["onboard_step"] = step - 1
+            st.rerun()
+        if step < len(_ONBOARD) - 1:
+            if c2.button("下一步", key="ob_next", type="primary", use_container_width=True):
+                st.session_state["onboard_step"] = step + 1
+                st.rerun()
+        else:
+            if c2.button("开始练习", key="ob_done", type="primary", use_container_width=True):
+                profile.set_onboarded(True)
+                st.session_state.pop("onboard_step", None)
+                st.rerun()
+        if c3.button("不再提示", key="ob_skip"):
+            profile.set_onboarded(True)
+            st.session_state.pop("onboard_step", None)
+            st.rerun()
+
+
 def render(resume: str, jd: str) -> None:
+    render_onboarding()
     restore()
     m = st.session_state.get("mini")
     if m is not None:
